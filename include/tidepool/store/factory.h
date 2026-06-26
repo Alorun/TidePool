@@ -1,0 +1,26 @@
+// factory.h — Construction helpers for the concrete store components.
+// Plane: DATA (node-internal). Lets apps/tests assemble a StorageNode without
+// depending on the private impl headers under src/.
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <string>
+
+#include "tidepool/store/eviction_policy.h"
+#include "tidepool/store/tier.h"
+
+namespace tidepool {
+
+// DRAM tier with the given byte capacity (capacity is advisory in the MVP).
+std::unique_ptr<Tier> MakeDramTier(uint64_t capacity_bytes);
+
+// SSD tier backed by LevelDB at `db_path`. Returns a tier whose methods report
+// NotImplemented unless built with -DTIDEPOOL_WITH_LEVELDB=ON. Call Tier-level
+// setup via the node; opening is handled internally on first use (TODO).
+std::unique_ptr<Tier> MakeSsdTier(std::string db_path);
+
+std::unique_ptr<EvictionPolicy> MakeLruEviction();
+std::unique_ptr<EvictionPolicy> MakeCostAwareEviction();  // stub policy
+
+}  // namespace tidepool
