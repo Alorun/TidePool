@@ -1,4 +1,4 @@
-#include "../../include/tidepool/api/status.h"
+#include "tidepool/api/status.h"
 
 namespace tidepool {
 

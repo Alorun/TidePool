@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "location.h"
+#include "tidepool/api/location.h"
 
 namespace tidepool {
 

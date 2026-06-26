@@ -4,12 +4,12 @@
 
 #include <vector>
 
-#include "block.h"
-#include "block_key.h"
-#include "buffer.h"
-#include "location.h"
-#include "shard_map.h"
-#include "status.h"
+#include "tidepool/api/block.h"
+#include "tidepool/api/block_key.h"
+#include "tidepool/api/buffer.h"
+#include "tidepool/api/location.h"
+#include "tidepool/api/shard_map.h"
+#include "tidepool/api/status.h"
 
 namespace tidepool {
 

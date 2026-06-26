@@ -12,7 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "block.h"  // BlockMetadata
+#include "tidepool/api/block.h"  
 
 namespace tidepool {
 

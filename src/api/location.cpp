@@ -1,4 +1,4 @@
-#include "../../include/tidepool/api/location.h"
+#include "tidepool/api/location.h"
 
 namespace tidepool {
 

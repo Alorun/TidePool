@@ -1,0 +1,55 @@
+# ---- Build output -----------------------------------------------------------
+# Out-of-source CMake build trees. `build/` is the convention used in the README
+# (`cmake -B build`); also ignore any *build*/ variant and the in-source clutter
+# CMake leaves if someone configures in the tree by mistake.
+build/
+build*/
+# cmake-build-*/ is CLion's default out-of-source tree.
+cmake-build-*/
+out/
+
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+*.cmake.stamp
+compile_commands.json
+install_manifest.txt
+Testing/
+
+# ---- Compiled objects / libraries / binaries --------------------------------
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# Our binaries land in build/bin, but ignore stray ones too.
+apps
+tidepool_node
+tidepool_coord
+*smoke_test
+
+# ---- Optional backend artifacts ---------------------------------------------
+# SSD tier (LevelDB) scratch dirs used by the runnable demo (see apps/).
+/tmp/tidepool-*
+*.ldb
+*.sst
+
+# ---- Editor / IDE / OS ------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Misc -------------------------------------------------------------------
+*.log

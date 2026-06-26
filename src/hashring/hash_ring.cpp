@@ -15,7 +15,8 @@ uint64_t PointHash(const std::string& label) { return std::hash<std::string>{}(l
 void HashRing::Rebuild(const ShardMap& map) {
     ring_.clear();
     version_ = map.version;
-    for (const auto& node : map.nodes) {
+    for (size_t i = 0; i < map.nodes.size(); i++) {
+        auto node = map.nodes[i];
         if (!node.alive) continue;
         const uint32_t vnodes = node.vnode_count > 0 ? node.vnode_count : 1;
         for (uint32_t v = 0; v < vnodes; ++v) {

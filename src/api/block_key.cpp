@@ -1,4 +1,4 @@
-#include "../../include/tidepool/api/block_key.h"
+#include "tidepool/api/block_key.h"
 
 #include <cstdio>
 #include <string>

@@ -41,8 +41,7 @@ Result<NodeId> Connector::ResolveOwner(const BlockKey& key) {
 
 Result<HitMap> Connector::Lookup(const std::vector<BlockKey>& keys) {
     // TODO: group keys by owning node (ResolveOwner), issue one batched
-    // presence probe per node over the transport, assemble the bitmap. Stubbed
-    // for now.
+    // presence probe per node over the transport, assemble the bitmap. Stubbed for now.
     (void)keys;
     return Status::NotImplemented("Connector::Lookup");
 }
@@ -66,8 +65,7 @@ Status Connector::Get(const BlockKey& key, const MutableBuffer& dst, BlockView* 
     // TODO: fill ref.address from the cached ShardMap and
     // ref.handle/remote_addr from a remote index probe before the transfer.
     if (Status s = transport_->ReadRemote(ref, dst.data, dst.capacity); !s.ok()) {
-        return s;  // currently NotImplemented from the TCP stub — call path is
-                   // real
+        return s;  // currently NotImplemented from the TCP stub — call path is real
     }
     // TODO: populate *out (size + metadata) from the transfer response framing.
     (void)out;
@@ -83,12 +81,10 @@ Status Connector::Put(const BlockKey& key, const Block& block) {
         return local_node_->Put(key, block);
     }
 
-    // REMOTE: hand the bytes to the Transfer Engine (TCP now, RDMA later, same
-    // ABC).
+    // REMOTE: hand the bytes to the Transfer Engine (TCP now, RDMA later, same ABC).
     RemoteRef ref;
     ref.node_id = owner.value();
-    // TODO: fill ref.address/handle from the cached ShardMap; chunk large
-    // blocks.
+    // TODO: fill ref.address/handle from the cached ShardMap; chunk large blocks.
     return transport_->WriteRemote(ref, block.data.data(), block.size_bytes());
 }
 
