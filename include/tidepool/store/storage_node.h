@@ -68,6 +68,19 @@ public:
     bool Contains(const BlockKey& key) const;
 
 private:
+    // Return the owned tier of the given type, or nullptr if this node has none.
+    Tier* TierOf(TierType type);
+    // The next colder tier after DRAM (the demotion sink), or nullptr.
+    Tier* ColderTier();
+    // Free DRAM slots while the DRAM tier is over its (advisory) byte budget by
+    // asking the policy for victims and sinking them to the colder tier. No-op
+    // when there is no colder tier or no victim. Best-effort: stops if the sink
+    // write fails (e.g. SSD backend not built).
+    void MakeDramRoom();
+    // Backfill a block just read from a colder tier into DRAM (ARC promotion):
+    // make room, copy into DRAM, repoint the index, notify the policy.
+    void PromoteToDram(const BlockKey& key, const BlockView& view);
+
     NodeId id_;
     std::vector<std::unique_ptr<Tier>> tiers_;  // hottest-first
     std::unique_ptr<EvictionPolicy> eviction_;

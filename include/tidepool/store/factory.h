@@ -23,4 +23,9 @@ std::unique_ptr<Tier> MakeSsdTier(std::string db_path);
 std::unique_ptr<EvictionPolicy> MakeLruEviction();
 std::unique_ptr<EvictionPolicy> MakeCostAwareEviction();  // stub policy
 
+// ARC (Adaptive Replacement Cache) policy over the DRAM tier. `capacity_blocks`
+// is the DRAM cache size measured in block count (ARC's classic page count). It
+// coexists with LRU as a selectable alternative; LRU stays the baseline.
+std::unique_ptr<EvictionPolicy> MakeArcEviction(size_t capacity_blocks);
+
 }  // namespace tidepool

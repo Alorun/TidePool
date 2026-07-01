@@ -6,4 +6,8 @@ target_link_libraries(tidepool_smoke_test
     tidepool_store
     tidepool_hashring
     tidepool_coordinator)
+# Let the smoke test reach the ARC policy's private impl header so it can assert
+# on the internal T1/T2/B1/B2 lists and the adaptive parameter p.
+target_include_directories(tidepool_smoke_test
+  PRIVATE ${PROJECT_SOURCE_DIR}/src/store/eviction)
 add_test(NAME tidepool_smoke_test COMMAND tidepool_smoke_test)

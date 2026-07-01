@@ -12,8 +12,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <string>
 #include <vector>
 
+#include "arc_eviction.h"  // private impl header (see tests/CMakeLists include dir)
 #include "tidepool/coordinator/factory.h"
 #include "tidepool/hashring/hash_ring.h"
 #include "tidepool/store/factory.h"
@@ -95,9 +97,62 @@ static void TestCoordinatorVersioning() {
     CHECK(v1.value().version > v0.value().version, "registration must bump the shard map version");
 }
 
+// Drives the ARC policy directly through one full cycle: cold insert -> T1,
+// hit -> T2, REPLACE (Victim) -> ghost, recency ghost hit -> p up, frequency
+// ghost hit -> p down. Asserts the internal lists + adaptive parameter so a
+// regression in the algorithm (not just the wiring) is caught.
+static void TestArcEvictionPolicy() {
+    auto k = [](TokenId t) { return BlockKey::FromTokenPrefix({t}, 1); };
+    const auto A = k(1), B = k(2), C = k(3), D = k(4);
+
+    ArcEviction arc(/*capacity_blocks=*/2);
+    CHECK(std::string(arc.name()) == "arc", "policy name must be arc");
+    CHECK(arc.c() == 2, "capacity must be configured in blocks");
+
+    // Cold inserts land in T1 (seen once).
+    arc.OnInsert(A, 0);
+    arc.OnInsert(B, 0);
+    CHECK(arc.t1_size() == 2 && arc.t2_size() == 0, "cold inserts go to T1");
+
+    // A real hit promotes to T2 (seen twice).
+    arc.OnAccess(A);
+    CHECK(arc.t1_size() == 1 && arc.t2_size() == 1, "hit promotes T1 -> T2");
+
+    // Cold-insert C, then REPLACE: T1.LRU (B) is the recency victim and lands on
+    // the B1 ghost list.
+    arc.OnInsert(C, 0);
+    auto v = arc.Victim();
+    CHECK(v.has_value() && *v == B, "Victim must demote the T1 LRU (B)");
+    CHECK(arc.b1_size() == 1 && arc.t1_size() == 1 && arc.t2_size() == 1, "victim moves to B1");
+
+    // Recency ghost hit on B (in B1): p adapts up by max(|B2|/|B1|,1)=1, B -> T2.
+    arc.OnAccess(B);
+    CHECK(arc.p() == 1.0, "B1 ghost hit must raise p");
+    CHECK(arc.b1_size() == 0 && arc.t2_size() == 2, "ghost hit brings key back to T2");
+
+    // Push two more cold inserts and drain to force a T2 demotion into B2.
+    arc.OnInsert(D, 0);  // T1=[D,C], T2=[A,B]
+    auto v1 = arc.Victim();
+    CHECK(v1.has_value() && *v1 == C, "first victim is recency (T1 LRU = C)");
+    auto v2 = arc.Victim();  // now |T1|(=1) not > p(=1) -> demote from T2
+    CHECK(v2.has_value() && *v2 == A, "second victim is frequency (T2 LRU = A)");
+    CHECK(arc.b2_size() == 1, "T2 victim moves to B2");
+
+    // Frequency ghost hit on A (in B2): p adapts down by max(|B1|/|B2|,1)=1.
+    const double p_before = arc.p();
+    arc.OnAccess(A);
+    CHECK(arc.p() == p_before - 1.0, "B2 ghost hit must lower p");
+    CHECK(arc.b2_size() == 0 && arc.t2_size() == 2, "frequency ghost hit returns key to T2");
+
+    // OnRemove forgets all bookkeeping for a key.
+    arc.OnRemove(A);
+    CHECK(arc.t2_size() == 1, "OnRemove drops the key from its list");
+}
+
 int main() {
     TestBlockKeyPrefixReuse();
     TestStorageNodeDramRoundTrip();
+    TestArcEvictionPolicy();
     TestHashRingDeterministicRouting();
     TestCoordinatorVersioning();
     std::printf("tidepool smoke test: all checks passed\n");
