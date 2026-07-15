@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "tidepool/store/tier.h"
@@ -33,6 +34,10 @@ public:
 
 private:
     std::string db_path_;
+    // LevelDB itself is internally thread-safe for concurrent Get/Put/Delete,
+    // but the read-modify-write on stats_ (and the probe+write in Put) is not,
+    // so we serialize those with this lock. Stats() also takes it.
+    mutable std::mutex mu_;
     TierStats stats_;
     // Opaque handle to the LevelDB instance (kept type-erased so the public
     // header pulls in no leveldb headers). nullptr when unopened/stubbed.

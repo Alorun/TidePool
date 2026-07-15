@@ -4,6 +4,7 @@
 add_library(tidepool_api
   status.cpp
   block_key.cpp
+  block_codec.cpp
   location.cpp)
 
 target_include_directories(tidepool_api PUBLIC ${PROJECT_SOURCE_DIR}/include)

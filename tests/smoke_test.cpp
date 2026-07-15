@@ -11,15 +11,25 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>  // std::memcmp
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "arc_eviction.h"  // private impl header (see tests/CMakeLists include dir)
+#include "tidepool/api/block_codec.h"
 #include "tidepool/coordinator/factory.h"
 #include "tidepool/hashring/hash_ring.h"
 #include "tidepool/store/factory.h"
 #include "tidepool/store/storage_node.h"
+
+#ifdef TIDEPOOL_WITH_LEVELDB
+#include <unistd.h>  // getpid
+
+#include <filesystem>
+
+#include "ssd_tier.h"  // private impl header (see tests/CMakeLists include dir)
+#endif
 
 using namespace tidepool;
 
@@ -149,12 +159,156 @@ static void TestArcEvictionPolicy() {
     CHECK(arc.t2_size() == 1, "OnRemove drops the key from its list");
 }
 
+// block_codec: a non-trivial Block survives Serialize -> DeserializeHeader with
+// its shape metadata equal field-by-field and its payload equal byte-for-byte.
+// Pure byte codec — no LevelDB, so this always runs.
+static void TestBlockCodecRoundTrip() {
+    Block blk;
+    blk.metadata.num_tokens = 128;
+    blk.metadata.num_layers = 32;
+    blk.metadata.dtype_size = 2;
+    blk.metadata.kv_heads = 8;
+    blk.metadata.created_unix_ns = 0x0123456789abcdefULL;
+    blk.metadata.model_fingerprint = 0xdeadbeefU;
+    for (int i = 0; i < 777; ++i) blk.data.push_back(static_cast<uint8_t>((i * 131 + 7) & 0xff));
+
+    const std::string blob = SerializeBlock(blk);
+    CHECK(blob.size() == block_codec::kHeaderSize + blk.data.size(), "blob = header + payload");
+
+    BlockMetadata meta;
+    size_t plen = 0, poff = 0;
+    CHECK(DeserializeHeader(blob, &meta, &plen, &poff).ok(), "DeserializeHeader must succeed");
+    CHECK(meta.num_tokens == 128, "num_tokens roundtrips");
+    CHECK(meta.num_layers == 32, "num_layers roundtrips");
+    CHECK(meta.dtype_size == 2, "dtype_size roundtrips");
+    CHECK(meta.kv_heads == 8, "kv_heads roundtrips");
+    CHECK(meta.created_unix_ns == 0x0123456789abcdefULL, "created_unix_ns roundtrips");
+    CHECK(meta.model_fingerprint == 0xdeadbeefU, "model_fingerprint roundtrips");
+    CHECK(plen == blk.data.size(), "payload_len matches");
+    CHECK(poff == block_codec::kHeaderSize, "payload offset is header size");
+    CHECK(std::memcmp(blob.data() + poff, blk.data.data(), plen) == 0, "payload bytes roundtrip");
+}
+
+// Little-endian stability: pin the exact header bytes so anyone tempted to
+// switch to a struct memcpy (which would change the layout) breaks this test.
+static void TestBlockCodecEndianness() {
+    Block blk;
+    blk.metadata.num_tokens = 0x04030201U;  // distinct bytes to see the ordering
+    const std::string blob = SerializeBlock(blk);
+    CHECK(static_cast<uint8_t>(blob[0]) == 'T' && static_cast<uint8_t>(blob[1]) == 'P', "magic 'T','P'");
+    CHECK(static_cast<uint8_t>(blob[2]) == 0x01, "version byte == 1");
+    CHECK(static_cast<uint8_t>(blob[3]) == 0x00, "serde_id byte == 0 (raw)");
+    CHECK(static_cast<uint8_t>(blob[4]) == 0x01 && static_cast<uint8_t>(blob[5]) == 0x02 &&
+              static_cast<uint8_t>(blob[6]) == 0x03 && static_cast<uint8_t>(blob[7]) == 0x04,
+          "num_tokens stored little-endian");
+}
+
+// Robustness: malformed blobs return a specific error and never crash.
+static void TestBlockCodecRobustness() {
+    BlockMetadata meta;
+    size_t plen = 0, poff = 0;
+
+    const std::string tiny(10, 'x');  // shorter than the 36-byte header
+    CHECK(DeserializeHeader(tiny, &meta, &plen, &poff).code() == StatusCode::kInvalidArgument,
+          "truncated blob -> kInvalidArgument");
+
+    Block blk;
+    blk.data = {1, 2, 3};
+    const std::string good = SerializeBlock(blk);
+
+    std::string bad_magic = good;
+    bad_magic[0] = 'X';
+    CHECK(DeserializeHeader(bad_magic, &meta, &plen, &poff).code() == StatusCode::kInvalidArgument,
+          "bad magic -> kInvalidArgument");
+
+    std::string bad_version = good;
+    bad_version[2] = 0x7f;
+    CHECK(DeserializeHeader(bad_version, &meta, &plen, &poff).code() == StatusCode::kInvalidArgument,
+          "unknown version -> kInvalidArgument");
+
+    std::string bad_serde = good;
+    bad_serde[3] = 0x07;  // unknown serde_id
+    CHECK(DeserializeHeader(bad_serde, &meta, &plen, &poff).code() == StatusCode::kNotImplemented,
+          "unknown serde_id -> kNotImplemented");
+
+    std::string lying_len = good;
+    for (int i = 0; i < 8; ++i) lying_len[28 + i] = static_cast<char>(0xff);  // payload_len = huge
+    CHECK(DeserializeHeader(lying_len, &meta, &plen, &poff).code() == StatusCode::kInvalidArgument,
+          "payload_len past end -> kInvalidArgument");
+}
+
+#ifdef TIDEPOOL_WITH_LEVELDB
+// SsdTier end-to-end on a throwaway LevelDB directory: Put -> Get (fits) ->
+// Get (too small, probe) -> Evict -> Get (gone). Only built with LevelDB.
+static void TestSsdTierRoundTrip() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("tidepool_ssd_test_" + std::to_string(::getpid()));
+    fs::remove_all(dir);  // start clean
+
+    const auto key = BlockKey::FromTokenPrefix({1, 2, 3}, 3);
+    Block blk;
+    blk.metadata.num_tokens = 3;
+    blk.metadata.model_fingerprint = 0xabcU;
+    blk.data = {9, 8, 7, 6, 5};
+    const uint64_t expected_bytes = block_codec::kHeaderSize + blk.data.size();
+
+    {
+        SsdTier tier(dir.string());
+        CHECK(tier.Open().ok(), "SsdTier::Open must succeed");
+        uint64_t handle = 0;
+        CHECK(tier.Put(key, blk, &handle).ok(), "SsdTier::Put must succeed");
+        CHECK(tier.Stats().num_blocks == 1 && tier.Stats().used_bytes == expected_bytes,
+              "Put updates SSD occupancy stats");
+    }
+
+    // Reopen the persistent database. Open must reconstruct occupancy stats,
+    // and the self-describing value must remain readable without LocalIndex.
+    {
+        SsdTier tier(dir.string());
+        CHECK(tier.Open().ok(), "SsdTier reopen must succeed");
+        CHECK(tier.Stats().num_blocks == 1 && tier.Stats().used_bytes == expected_bytes,
+              "Open rebuilds SSD occupancy stats");
+
+        std::vector<uint8_t> buf(64);
+        MutableBuffer dst{buf.data(), buf.size()};
+        BlockView view;
+        CHECK(tier.Get(key, dst, &view).ok(), "SsdTier::Get (fits) must succeed");
+        CHECK(view.size == 5, "view size matches payload");
+        CHECK(view.data == buf.data(), "view points into the caller buffer");
+        CHECK(std::memcmp(view.data, blk.data.data(), 5) == 0, "payload roundtrips through SSD");
+        CHECK(view.metadata.num_tokens == 3 && view.metadata.model_fingerprint == 0xabcU,
+              "metadata roundtrips");
+
+        std::vector<uint8_t> small(2);
+        MutableBuffer sdst{small.data(), small.size()};
+        BlockView sview;
+        const Status too_small = tier.Get(key, sdst, &sview);
+        CHECK(too_small.code() == StatusCode::kOutOfCapacity, "undersized dst -> kOutOfCapacity");
+        CHECK(sview.data == nullptr && sview.size == 5, "probe reports required size without a view");
+
+        CHECK(tier.Evict(key).ok(), "SsdTier::Evict must succeed");
+        CHECK(tier.Stats().num_blocks == 0 && tier.Stats().used_bytes == 0,
+              "Evict updates SSD occupancy stats");
+        BlockView gone;
+        CHECK(tier.Get(key, dst, &gone).code() == StatusCode::kNotFound, "Get after Evict -> kNotFound");
+    }
+
+    fs::remove_all(dir);  // cleanup after the LevelDB handle is closed
+}
+#endif
+
 int main() {
     TestBlockKeyPrefixReuse();
     TestStorageNodeDramRoundTrip();
     TestArcEvictionPolicy();
     TestHashRingDeterministicRouting();
     TestCoordinatorVersioning();
+    TestBlockCodecRoundTrip();
+    TestBlockCodecEndianness();
+    TestBlockCodecRobustness();
+#ifdef TIDEPOOL_WITH_LEVELDB
+    TestSsdTierRoundTrip();
+#endif
     std::printf("tidepool smoke test: all checks passed\n");
     return 0;
 }

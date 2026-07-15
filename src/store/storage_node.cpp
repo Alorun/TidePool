@@ -9,8 +9,8 @@ StorageNode::StorageNode(NodeId id, std::vector<std::unique_ptr<Tier>> tiers, st
 
 Tier* StorageNode::TierOf(TierType type) {
     for (size_t i = 0; i < tiers_.size(); i++) {
-        auto t = std::move(tiers_[i]);
-        if (t && t->type() == type) return t.get();
+        Tier* t = tiers_[i].get();
+        if (t && t->type() == type) return t;
     }
     return nullptr;
 }
