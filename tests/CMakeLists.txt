@@ -25,6 +25,26 @@ add_executable(tidepool_lifecycle_test lifecycle_test.cpp)
 target_link_libraries(tidepool_lifecycle_test PRIVATE tidepool_store)
 add_test(NAME tidepool_lifecycle_test COMMAND tidepool_lifecycle_test)
 
+find_package(Threads REQUIRED)
+
+add_executable(tidepool_dram_tier_test dram_tier_test.cpp)
+target_include_directories(tidepool_dram_tier_test PRIVATE ${PROJECT_SOURCE_DIR}/src/store/tier/dram)
+target_link_libraries(tidepool_dram_tier_test PRIVATE tidepool_store Threads::Threads)
+add_test(NAME tidepool_dram_tier_test COMMAND tidepool_dram_tier_test)
+
+add_executable(tidepool_eviction_test eviction_test.cpp)
+target_include_directories(tidepool_eviction_test PRIVATE ${PROJECT_SOURCE_DIR}/src/store/eviction)
+target_link_libraries(tidepool_eviction_test PRIVATE tidepool_store)
+add_test(NAME tidepool_eviction_test COMMAND tidepool_eviction_test)
+
+add_executable(tidepool_storage_migration_test storage_migration_test.cpp)
+target_include_directories(tidepool_storage_migration_test
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/store/eviction
+    ${PROJECT_SOURCE_DIR}/src/store/tier/dram)
+target_link_libraries(tidepool_storage_migration_test PRIVATE tidepool_store Threads::Threads)
+add_test(NAME tidepool_storage_migration_test COMMAND tidepool_storage_migration_test)
+
 if(TIDEPOOL_WITH_LEVELDB)
   add_executable(tidepool_ssd_lifecycle_test ssd_lifecycle_test.cpp)
   target_include_directories(tidepool_ssd_lifecycle_test PRIVATE ${PROJECT_SOURCE_DIR}/src/store/tier/ssd)

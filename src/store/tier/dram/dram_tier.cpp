@@ -1,6 +1,7 @@
 #include "dram_tier.h"
 
 #include <cstring>  // std::memcpy
+#include <new>      // std::bad_alloc
 
 #include "tidepool/store/factory.h"
 
@@ -12,20 +13,43 @@ std::unique_ptr<Tier> MakeDramTier(uint64_t capacity_bytes) { return std::make_u
 // stage 1) is exercisable end-to-end. Capacity enforcement / eviction wiring is
 // orchestrated by the StorageNode + EvictionPolicy and is left as TODO here.
 Status DramTier::Put(const BlockKey& key, const Block& block, uint64_t* out_handle) {
-    std::lock_guard<std::mutex> lock(mu_);
-    const uint64_t handle = next_handle_++;
-    auto [it, inserted] = store_.insert_or_assign(key, block);
-    if (inserted) {
-        stats_.num_blocks++;
-        stats_.used_bytes += it->second.size_bytes();
+    Block replacement;
+    try {
+        replacement = block;
+    } catch (const std::bad_alloc&) {
+        return Status(StatusCode::kOutOfCapacity, "DramTier::Put: block allocation failed");
     }
-    // TODO: reject / trigger demotion when used_bytes would exceed capacity.
+
+    std::lock_guard<std::mutex> lock(mu_);
+    const size_t new_size = replacement.size_bytes();
+    auto existing = store_.find(key);
+    if (existing != store_.end()) {
+        const size_t old_size = existing->second.size_bytes();
+        existing->second = std::move(replacement);
+        if (new_size >= old_size) {
+            stats_.used_bytes += new_size - old_size;
+        } else {
+            stats_.used_bytes -= old_size - new_size;
+        }
+    } else {
+        try {
+            store_.emplace(key, std::move(replacement));
+        } catch (const std::bad_alloc&) {
+            return Status(StatusCode::kOutOfCapacity, "DramTier::Put: map allocation failed");
+        }
+        stats_.num_blocks++;
+        stats_.used_bytes += new_size;
+    }
+
+    const uint64_t handle = next_handle_++;
+    stats_.put_count++;
     if (out_handle) *out_handle = handle;
     return Status::Ok();
 }
 
 Status DramTier::Get(const BlockKey& key, const MutableBuffer& dst, BlockView* out) {
     std::lock_guard<std::mutex> lock(mu_);
+    stats_.get_count++;
     auto it = store_.find(key);
     if (it == store_.end()) {
         stats_.misses++;
@@ -60,6 +84,7 @@ Status DramTier::Evict(const BlockKey& key) {
     stats_.used_bytes -= it->second.size_bytes();
     stats_.num_blocks--;
     store_.erase(it);
+    stats_.evict_count++;
     return Status::Ok();
 }
 

@@ -25,6 +25,11 @@ public:
     // Insert or overwrite the location for `key`.
     Status Upsert(const BlockKey& key, const Location& loc);
 
+    // Change only the tier-local placement fields of an existing entry after
+    // verifying its current tier. This performs no allocation and is used by the
+    // DRAM->SSD commit path while StorageNode holds its node-wide lock.
+    Status Relocate(const BlockKey& key, TierType expected_tier, TierType new_tier, uint64_t new_handle);
+
     // Look up the current location of `key` on this node.
     Result<Location> Find(const BlockKey& key) const;
 

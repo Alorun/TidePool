@@ -26,6 +26,9 @@ struct TierStats {
     uint64_t num_blocks = 0;
     uint64_t used_bytes = 0;
     uint64_t capacity_bytes = 0;
+    uint64_t put_count = 0;
+    uint64_t get_count = 0;
+    uint64_t evict_count = 0;
     uint64_t hits = 0;
     uint64_t misses = 0;
 };

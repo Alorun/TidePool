@@ -134,8 +134,9 @@ static void TestArcEvictionPolicy() {
     // Cold-insert C, then REPLACE: T1.LRU (B) is the recency victim and lands on
     // the B1 ghost list.
     arc.OnInsert(C, 0);
-    auto v = arc.Victim();
-    CHECK(v.has_value() && *v == B, "Victim must demote the T1 LRU (B)");
+    auto v = arc.SelectVictim();
+    CHECK(v.ok() && v.value() == B, "SelectVictim must reserve the T1 LRU (B)");
+    CHECK(arc.CommitVictim(B).ok(), "committing B must succeed");
     CHECK(arc.b1_size() == 1 && arc.t1_size() == 1 && arc.t2_size() == 1, "victim moves to B1");
 
     // Recency ghost hit on B (in B1): p adapts up by max(|B2|/|B1|,1)=1, B -> T2.
@@ -145,10 +146,12 @@ static void TestArcEvictionPolicy() {
 
     // Push two more cold inserts and drain to force a T2 demotion into B2.
     arc.OnInsert(D, 0);  // T1=[D,C], T2=[A,B]
-    auto v1 = arc.Victim();
-    CHECK(v1.has_value() && *v1 == C, "first victim is recency (T1 LRU = C)");
-    auto v2 = arc.Victim();  // now |T1|(=1) not > p(=1) -> demote from T2
-    CHECK(v2.has_value() && *v2 == A, "second victim is frequency (T2 LRU = A)");
+    auto v1 = arc.SelectVictim();
+    CHECK(v1.ok() && v1.value() == C, "first victim is recency (T1 LRU = C)");
+    CHECK(arc.CommitVictim(C).ok(), "committing C must succeed");
+    auto v2 = arc.SelectVictim();  // now |T1|(=1) not > p(=1) -> demote from T2
+    CHECK(v2.ok() && v2.value() == A, "second victim is frequency (T2 LRU = A)");
+    CHECK(arc.CommitVictim(A).ok(), "committing A must succeed");
     CHECK(arc.b2_size() == 1, "T2 victim moves to B2");
 
     // Frequency ghost hit on A (in B2): p adapts down by max(|B1|/|B2|,1)=1.

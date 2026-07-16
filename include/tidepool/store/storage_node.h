@@ -24,6 +24,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "tidepool/api/block.h"
@@ -71,20 +72,25 @@ public:
     // Cheap presence check used by Connector::Lookup batching. Returns
     // kUnavailable while the node is not open.
     Result<bool> Contains(const BlockKey& key) const;
+    // Return the node-local primary location. Primarily used by local serving
+    // and consistency tests; returns kUnavailable while the node is closed.
+    Result<Location> Locate(const BlockKey& key) const;
 
 private:
-    // Return the owned tier of the given type, or nullptr if this node has none.
-    Tier* TierOf(TierType type);
+    // Private helpers require lifecycle_mu_ to be held by the caller.
+    Tier* TierOfLocked(TierType type);
     // The next colder tier after DRAM (the demotion sink), or nullptr.
-    Tier* ColderTier();
-    // Free DRAM slots while the DRAM tier is over its (advisory) byte budget by
-    // asking the policy for victims and sinking them to the colder tier. No-op
-    // when there is no colder tier or no victim. Best-effort: stops if the sink
-    // write fails (e.g. SSD backend not built).
-    void MakeDramRoom();
+    Tier* ColderTierLocked();
+    Status ReadBlockLocked(Tier* tier, const BlockKey& key, Block* out);
+    Status DemoteOneVictimLocked(Tier* dram, Tier* sink);
+    // Demote victims until DRAM is within its byte budget. Any failure is
+    // returned to Put so the initiating write can be rolled back.
+    Status MakeDramRoomLocked();
+    Status RollbackPutLocked(const BlockKey& key, Tier* hot, const std::optional<Location>& old_location,
+                             const std::optional<Block>& old_dram_block, bool policy_inserted);
     // Backfill a block just read from a colder tier into DRAM (ARC promotion):
     // make room, copy into DRAM, repoint the index, notify the policy.
-    void PromoteToDram(const BlockKey& key, const BlockView& view);
+    void PromoteToDramLocked(const BlockKey& key, const BlockView& view);
 
     NodeId id_;
     std::vector<std::unique_ptr<Tier>> tiers_;  // hottest-first
