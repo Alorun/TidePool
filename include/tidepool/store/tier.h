@@ -36,6 +36,13 @@ public:
 
     virtual TierType type() const = 0;
 
+    // Lifecycle hooks. In-memory tiers need no external initialization, so the
+    // default implementation is always ready and Open/Close are idempotent
+    // no-ops. Resource-owning tiers override all three methods.
+    virtual Status Open() { return Status::Ok(); }
+    virtual Status Close() { return Status::Ok(); }
+    virtual bool IsReady() const { return true; }
+
     // Store `block` under `key`. On success, `*out_handle` receives the
     // tier-local handle to embed in a Location.
     // TODO: support in-place / zero-copy ingestion from a registered MemRegion.

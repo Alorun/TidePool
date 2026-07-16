@@ -7,6 +7,79 @@ namespace tidepool {
 StorageNode::StorageNode(NodeId id, std::vector<std::unique_ptr<Tier>> tiers, std::unique_ptr<EvictionPolicy> eviction)
     : id_(std::move(id)), tiers_(std::move(tiers)), eviction_(std::move(eviction)) {}
 
+StorageNode::~StorageNode() { (void)Close(); }
+
+Status StorageNode::Open() {
+    std::lock_guard<std::mutex> lock(lifecycle_mu_);
+    if (ready_) return Status::Ok();
+    if (tiers_.empty()) return Status::Internal("StorageNode::Open: node has no tiers");
+
+    size_t opened = 0;
+    Status failure = Status::Ok();
+    size_t failed_index = 0;
+    for (size_t i = 0; i < tiers_.size(); ++i) {
+        Tier* tier = tiers_[i].get();
+        if (tier == nullptr) {
+            failure = Status::Internal("configured tier is null");
+            failed_index = i;
+            break;
+        }
+
+        failure = tier->Open();
+        if (!failure.ok()) {
+            failed_index = i;
+            break;
+        }
+        opened = i + 1;
+        if (!tier->IsReady()) {
+            failure = Status::Internal("Open returned OK but tier is not ready");
+            failed_index = i;
+            break;
+        }
+    }
+
+    if (!failure.ok()) {
+        std::string message = "StorageNode::Open: tier[" + std::to_string(failed_index) + "]";
+        if (tiers_[failed_index]) message += " (" + std::string(TierTypeName(tiers_[failed_index]->type())) + ")";
+        message += " failed: " + failure.ToString();
+
+        while (opened > 0) {
+            --opened;
+            Tier* tier = tiers_[opened].get();
+            if (tier == nullptr) continue;
+            if (Status rollback = tier->Close(); !rollback.ok()) {
+                message += "; rollback close tier[" + std::to_string(opened) + "] (" +
+                           TierTypeName(tier->type()) + ") failed: " + rollback.ToString();
+            }
+        }
+        ready_ = false;
+        return Status(failure.code(), std::move(message));
+    }
+
+    ready_ = true;
+    return Status::Ok();
+}
+
+Status StorageNode::Close() {
+    std::lock_guard<std::mutex> lock(lifecycle_mu_);
+    Status first_error = Status::Ok();
+    for (size_t i = tiers_.size(); i > 0; --i) {
+        Tier* tier = tiers_[i - 1].get();
+        if (tier == nullptr) continue;
+        if (Status s = tier->Close(); !s.ok() && first_error.ok()) {
+            first_error = Status(s.code(), "StorageNode::Close: tier[" + std::to_string(i - 1) + "] (" +
+                                                   TierTypeName(tier->type()) + ") failed: " + s.ToString());
+        }
+    }
+    ready_ = false;
+    return first_error;
+}
+
+bool StorageNode::IsReady() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mu_);
+    return ready_;
+}
+
 Tier* StorageNode::TierOf(TierType type) {
     for (size_t i = 0; i < tiers_.size(); i++) {
         Tier* t = tiers_[i].get();
@@ -81,6 +154,8 @@ void StorageNode::PromoteToDram(const BlockKey& key, const BlockView& view) {
 }
 
 Status StorageNode::Put(const BlockKey& key, const Block& block) {
+    std::lock_guard<std::mutex> lock(lifecycle_mu_);
+    if (!ready_) return Status::Unavailable("StorageNode::Put: node is not open");
     if (tiers_.empty()) return Status::Internal("storage node has no tiers");
     // Place into the hottest tier (front). Cross-tier demotion on capacity
     // pressure is orchestrated here.
@@ -96,6 +171,8 @@ Status StorageNode::Put(const BlockKey& key, const Block& block) {
 }
 
 Status StorageNode::Get(const BlockKey& key, const MutableBuffer& dst, BlockView* out) {
+    std::lock_guard<std::mutex> lock(lifecycle_mu_);
+    if (!ready_) return Status::Unavailable("StorageNode::Get: node is not open");
     // Contract (differs from a hit-only policy): notify the policy of EVERY
     // access FIRST, including misses. An adaptive policy (ARC) must observe
     // ghost-list hits to tune itself; for an unknown key OnAccess is a no-op.
@@ -129,6 +206,10 @@ Status StorageNode::Get(const BlockKey& key, const MutableBuffer& dst, BlockView
     return Status::Ok();
 }
 
-bool StorageNode::Contains(const BlockKey& key) const { return index_.Contains(key); }
+Result<bool> StorageNode::Contains(const BlockKey& key) const {
+    std::lock_guard<std::mutex> lock(lifecycle_mu_);
+    if (!ready_) return Status::Unavailable("StorageNode::Contains: node is not open");
+    return index_.Contains(key);
+}
 
 }  // namespace tidepool

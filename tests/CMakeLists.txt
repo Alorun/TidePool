@@ -11,16 +11,24 @@ target_link_libraries(tidepool_smoke_test
 target_include_directories(tidepool_smoke_test
   PRIVATE ${PROJECT_SOURCE_DIR}/src/store/eviction)
 
-# When (and only when) the SSD tier is actually built against LevelDB, enable
-# the SsdTier round-trip test: reach the private ssd_tier.h header (for Open())
-# and define the same toggle the tier library uses so the #ifdef block compiles.
-# Mirror the tier's find_package guard so ON-but-not-found still builds/tests.
+# When the SSD tier is built against LevelDB, enable its conditional smoke test.
+# Dependency resolution is centralized at the project root, where an explicitly
+# requested but unavailable LevelDB is a configuration error.
 if(TIDEPOOL_WITH_LEVELDB)
-  find_package(leveldb QUIET)
-  if(leveldb_FOUND)
-    target_include_directories(tidepool_smoke_test PRIVATE ${PROJECT_SOURCE_DIR}/src/store/tier/ssd)
-    target_compile_definitions(tidepool_smoke_test PRIVATE TIDEPOOL_WITH_LEVELDB)
-  endif()
+  target_include_directories(tidepool_smoke_test PRIVATE ${PROJECT_SOURCE_DIR}/src/store/tier/ssd)
+  target_compile_definitions(tidepool_smoke_test PRIVATE TIDEPOOL_WITH_LEVELDB)
 endif()
 
 add_test(NAME tidepool_smoke_test COMMAND tidepool_smoke_test)
+
+add_executable(tidepool_lifecycle_test lifecycle_test.cpp)
+target_link_libraries(tidepool_lifecycle_test PRIVATE tidepool_store)
+add_test(NAME tidepool_lifecycle_test COMMAND tidepool_lifecycle_test)
+
+if(TIDEPOOL_WITH_LEVELDB)
+  add_executable(tidepool_ssd_lifecycle_test ssd_lifecycle_test.cpp)
+  target_include_directories(tidepool_ssd_lifecycle_test PRIVATE ${PROJECT_SOURCE_DIR}/src/store/tier/ssd)
+  target_compile_definitions(tidepool_ssd_lifecycle_test PRIVATE TIDEPOOL_WITH_LEVELDB)
+  target_link_libraries(tidepool_ssd_lifecycle_test PRIVATE tidepool_store Threads::Threads)
+  add_test(NAME tidepool_ssd_lifecycle_test COMMAND tidepool_ssd_lifecycle_test)
+endif()

@@ -39,6 +39,18 @@ option(TIDEPOOL_WITH_LEVELDB "Build the SSD tier with the LevelDB backend" OFF)
 option(TIDEPOOL_WITH_RDMA    "Build the RDMA transport with libibverbs"    OFF)
 option(TIDEPOOL_BUILD_TESTS  "Build the (placeholder) test targets"        ON)
 
+if(TIDEPOOL_WITH_LEVELDB)
+  # LevelDB's exported target links Threads::Threads but some releases do not
+  # create that imported target in leveldbConfig.cmake themselves.
+  find_package(Threads REQUIRED)
+  find_package(leveldb CONFIG QUIET)
+  if(NOT leveldb_FOUND OR NOT TARGET leveldb::leveldb)
+    message(FATAL_ERROR
+      "TIDEPOOL_WITH_LEVELDB=ON requires LevelDB with the leveldb::leveldb "
+      "CMake target. Install LevelDB or set leveldb_DIR/CMAKE_PREFIX_PATH.")
+  endif()
+endif()
+
 message(STATUS "tidepool: TIDEPOOL_WITH_LEVELDB = ${TIDEPOOL_WITH_LEVELDB}")
 message(STATUS "tidepool: TIDEPOOL_WITH_RDMA    = ${TIDEPOOL_WITH_RDMA}")
 

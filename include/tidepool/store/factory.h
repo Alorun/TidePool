@@ -15,9 +15,9 @@ namespace tidepool {
 // DRAM tier with the given byte capacity (capacity is advisory in the MVP).
 std::unique_ptr<Tier> MakeDramTier(uint64_t capacity_bytes);
 
-// SSD tier backed by LevelDB at `db_path`. Returns a tier whose methods report
-// NotImplemented unless built with -DTIDEPOOL_WITH_LEVELDB=ON. Call Tier-level
-// setup via the node; opening is handled internally on first use (TODO).
+// SSD tier backed by LevelDB at `db_path`. Returns a tier whose Open/Put/Get
+// methods report NotImplemented unless built with -DTIDEPOOL_WITH_LEVELDB=ON.
+// StorageNode::Open initializes it through the common Tier lifecycle.
 std::unique_ptr<Tier> MakeSsdTier(std::string db_path);
 
 std::unique_ptr<EvictionPolicy> MakeLruEviction();

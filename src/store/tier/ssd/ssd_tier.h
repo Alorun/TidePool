@@ -23,8 +23,11 @@ public:
     ~SsdTier() override;
 
     // Open/create the backing store. Returns NotImplemented when built without
-    // LevelDB support. Call once before use.
-    Status Open();
+    // LevelDB support. Open and Close are idempotent; a successful Close may be
+    // followed by another Open.
+    Status Open() override;
+    Status Close() override;
+    bool IsReady() const override;
 
     TierType type() const override { return TierType::kSsd; }
     Status Put(const BlockKey& key, const Block& block, uint64_t* out_handle) override;
@@ -34,9 +37,9 @@ public:
 
 private:
     std::string db_path_;
-    // LevelDB itself is internally thread-safe for concurrent Get/Put/Delete,
-    // but the read-modify-write on stats_ (and the probe+write in Put) is not,
-    // so we serialize those with this lock. Stats() also takes it.
+    // Guards the complete lifetime and use of db_, plus stats_. Holding this lock
+    // for each LevelDB operation makes Close wait for in-flight calls before it
+    // deletes the database object.
     mutable std::mutex mu_;
     TierStats stats_;
     // Opaque handle to the LevelDB instance (kept type-erased so the public

@@ -63,12 +63,14 @@ static void TestStorageNodeDramRoundTrip() {
     std::vector<std::unique_ptr<Tier>> tiers;
     tiers.push_back(MakeDramTier(1 << 20));
     StorageNode node("node-test", std::move(tiers), MakeLruEviction());
+    CHECK(node.Open().ok(), "storage node open must succeed");
 
     auto key = BlockKey::FromTokenPrefix({1, 2, 3}, 3);
     Block blk;
     blk.data = {1, 2, 3, 4, 5};
     CHECK(node.Put(key, blk).ok(), "put must succeed");
-    CHECK(node.Contains(key), "node must contain the key after put");
+    auto contains = node.Contains(key);
+    CHECK(contains.ok() && contains.value(), "node must contain the key after put");
 
     // Zero-copy read contract: caller provides the destination buffer; Get
     // fills it and returns a view over the bytes (see buffer.h).
@@ -78,6 +80,7 @@ static void TestStorageNodeDramRoundTrip() {
     CHECK(node.Get(key, dst, &view).ok(), "get must succeed");
     CHECK(view.size == 5, "view size must match block size");
     CHECK(view.data == rbuf.data(), "view must point into the caller buffer");
+    CHECK(node.Close().ok(), "storage node close must succeed");
 }
 
 static void TestHashRingDeterministicRouting() {

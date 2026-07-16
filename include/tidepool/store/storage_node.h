@@ -11,28 +11,19 @@
 // placement. It registers itself with the Coordinator (control plane) and then
 // serves whatever keys hash to it.
 //
-// CONCURRENCY MODEL (explicit, mostly TODO at this stage):
+// CONCURRENCY MODEL:
 //   * Expected workload: many concurrent Get/Put from the data-plane RPC server
 //     (one logical request per worker thread). Reads dominate.
-//   * Thread-safe today: each Tier guards its own state (DramTier holds a
-//     std::mutex). SsdTier delegates to LevelDB (internally synchronized).
-//   * NOT thread-safe yet (placeholders):
-//       - LocalIndex (index_) is a bare std::unordered_map with no lock;
-//       concurrent
-//         Put/Get on it is a data race. See TODO(concurrency-index) below.
-//       - StorageNode::Put's index update + tier write are two steps with no
-//         atomicity, so a concurrent Get can observe an index entry before the
-//         tier write is visible. See TODO(concurrency-put-atomicity).
+//   * A correctness-first lifecycle mutex currently serializes Open/Close and
+//     all node operations. Close therefore cannot tear down a Tier while an
+//     operation is in flight, and LocalIndex is not accessed concurrently.
 //   * TODO(concurrency-index): shard LocalIndex by key hash with a per-shard
-//     reader/writer lock (or a concurrent hash map) so Get/Put scale.
-//   * TODO(concurrency-put-atomicity): make "write tier then publish index" a
-//     well-defined order (publish only after the tier write is durable) and
-//     define visibility for in-flight demotions.
-//   * TODO(concurrency-eviction): Victim()->demote->Evict must be serialized
-//     against concurrent Get of the same key (refcount / pin while reading).
+//     reader/writer lock (or a concurrent hash map) before relaxing the node-wide
+//     lock so Get/Put can scale.
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "tidepool/api/block.h"
@@ -48,8 +39,21 @@ namespace tidepool {
 class StorageNode {
 public:
     StorageNode(NodeId id, std::vector<std::unique_ptr<Tier>> tiers, std::unique_ptr<EvictionPolicy> eviction);
+    ~StorageNode();
+
+    StorageNode(const StorageNode&) = delete;
+    StorageNode& operator=(const StorageNode&) = delete;
+    StorageNode(StorageNode&&) = delete;
+    StorageNode& operator=(StorageNode&&) = delete;
 
     const NodeId& id() const { return id_; }
+
+    // Open tiers in configured order. On failure, previously opened tiers are
+    // closed in reverse order and the node remains unavailable.
+    Status Open();
+    // Close every tier in reverse order. Safe to call repeatedly.
+    Status Close();
+    bool IsReady() const;
 
     // Hot-path serving API (invoked by the local RPC server in
     // apps/tidepool_node)
@@ -64,8 +68,9 @@ public:
     // mirrors Tier::Get so the no-copy contract holds end to end (see buffer.h).
     Status Get(const BlockKey& key, const MutableBuffer& dst, BlockView* out);
 
-    // Cheap presence check used by Connector::Lookup batching.
-    bool Contains(const BlockKey& key) const;
+    // Cheap presence check used by Connector::Lookup batching. Returns
+    // kUnavailable while the node is not open.
+    Result<bool> Contains(const BlockKey& key) const;
 
 private:
     // Return the owned tier of the given type, or nullptr if this node has none.
@@ -85,6 +90,8 @@ private:
     std::vector<std::unique_ptr<Tier>> tiers_;  // hottest-first
     std::unique_ptr<EvictionPolicy> eviction_;
     LocalIndex index_;
+    mutable std::mutex lifecycle_mu_;
+    bool ready_ = false;
 };
 
 }  // namespace tidepool

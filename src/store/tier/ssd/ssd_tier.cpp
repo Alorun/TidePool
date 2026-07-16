@@ -25,27 +25,17 @@
 namespace tidepool {
 
 std::unique_ptr<Tier> MakeSsdTier(std::string db_path) {
-    // TODO: open lazily / propagate Open() errors to the caller. For the
-    // scaffold we just construct; methods report NotImplemented without LevelDB
-    // support.
     return std::make_unique<SsdTier>(std::move(db_path));
 }
 
 SsdTier::SsdTier(std::string db_path) : db_path_(std::move(db_path)) {}
 
-SsdTier::~SsdTier() {
-#ifdef TIDEPOOL_WITH_LEVELDB
-    delete reinterpret_cast<leveldb::DB*>(db_);
-    db_ = nullptr;
-#endif
-}
+SsdTier::~SsdTier() { (void)Close(); }
 
 Status SsdTier::Open() {
 #ifdef TIDEPOOL_WITH_LEVELDB
     std::lock_guard<std::mutex> lock(mu_);
-    if (db_ != nullptr) {
-        return Status(StatusCode::kAlreadyExists, "SsdTier::Open called more than once");
-    }
+    if (db_ != nullptr) return Status::Ok();
 
     // TODO: wire options (block cache, compression).
     leveldb::DB* db = nullptr;
@@ -81,17 +71,33 @@ Status SsdTier::Open() {
 #endif
 }
 
+Status SsdTier::Close() {
+#ifdef TIDEPOOL_WITH_LEVELDB
+    std::lock_guard<std::mutex> lock(mu_);
+    auto* db = reinterpret_cast<leveldb::DB*>(db_);
+    if (db == nullptr) return Status::Ok();
+    delete db;
+    db_ = nullptr;
+#endif
+    return Status::Ok();
+}
+
+bool SsdTier::IsReady() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return db_ != nullptr;
+}
+
 Status SsdTier::Put([[maybe_unused]] const BlockKey& key, [[maybe_unused]] const Block& block,
                     [[maybe_unused]] uint64_t* out_handle) {
 #ifdef TIDEPOOL_WITH_LEVELDB
+    std::lock_guard<std::mutex> lock(mu_);
     auto* db = reinterpret_cast<leveldb::DB*>(db_);
-    if (db == nullptr) return Status::Internal("SsdTier::Put before Open()");
+    if (db == nullptr) return Status::Unavailable("SsdTier::Put: tier is not open");
 
     // The value we persist is the whole self-describing blob.
     const std::string blob = SerializeBlock(block);
     const std::string k = key.ToString();
 
-    std::lock_guard<std::mutex> lock(mu_);
     // Probe for an existing record so used_bytes/num_blocks stay accurate across
     // overwrites (SSD keeps no per-key size index of its own). This costs one
     // read on the write path, which is acceptable: Put is not the hot zero-copy
@@ -124,8 +130,9 @@ Status SsdTier::Put([[maybe_unused]] const BlockKey& key, [[maybe_unused]] const
 Status SsdTier::Get([[maybe_unused]] const BlockKey& key, [[maybe_unused]] const MutableBuffer& dst,
                     [[maybe_unused]] BlockView* out) {
 #ifdef TIDEPOOL_WITH_LEVELDB
+    std::lock_guard<std::mutex> lock(mu_);
     auto* db = reinterpret_cast<leveldb::DB*>(db_);
-    if (db == nullptr) return Status::Internal("SsdTier::Get before Open()");
+    if (db == nullptr) return Status::Unavailable("SsdTier::Get: tier is not open");
 
     // NOTE: SSD Get is NOT zero-copy. LevelDB copies the record into `value`
     // (copy #1), then we copy the payload out of `value` into the caller's dst
@@ -134,7 +141,6 @@ Status SsdTier::Get([[maybe_unused]] const BlockKey& key, [[maybe_unused]] const
     std::string value;
     const leveldb::Status s = db->Get(leveldb::ReadOptions(), key.ToString(), &value);
     if (s.IsNotFound()) {
-        std::lock_guard<std::mutex> lock(mu_);
         stats_.misses++;
         return Status::NotFound(key.ToString());
     }
@@ -162,10 +168,7 @@ Status SsdTier::Get([[maybe_unused]] const BlockKey& key, [[maybe_unused]] const
     if (dst.data == nullptr) return Status::InvalidArgument("dst buffer is null");
 
     std::memcpy(dst.data, value.data() + payload_off, payload_len);
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        stats_.hits++;
-    }
+    stats_.hits++;
     if (out) {
         out->data = dst.data;
         out->size = payload_len;
@@ -179,11 +182,11 @@ Status SsdTier::Get([[maybe_unused]] const BlockKey& key, [[maybe_unused]] const
 
 Status SsdTier::Evict([[maybe_unused]] const BlockKey& key) {
 #ifdef TIDEPOOL_WITH_LEVELDB
+    std::lock_guard<std::mutex> lock(mu_);
     auto* db = reinterpret_cast<leveldb::DB*>(db_);
-    if (db == nullptr) return Status::Internal("SsdTier::Evict before Open()");
+    if (db == nullptr) return Status::Unavailable("SsdTier::Evict: tier is not open");
 
     const std::string k = key.ToString();
-    std::lock_guard<std::mutex> lock(mu_);
     // Read the record first so we can adjust used_bytes by its true footprint;
     // absent -> NotFound (nothing to evict here).
     std::string existing;
