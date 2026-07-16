@@ -66,10 +66,11 @@ void ArcEviction::OnAccess(const BlockKey& key) {
     if (it == pos_.end()) {
         // Unknown key: ARC has never seen it (or it aged out of the ghosts).
         // Defer to the cold OnInsert (Case IV); clear the REPLACE context so a
-        // later Victim() does not mis-apply the frequency-ghost tie-break.
+        // later SelectVictim() does not mis-apply the frequency-ghost tie-break.
         last_hit_in_b2_ = false;
         return;
     }
+    if (reserved_ && reserved_->key == key) return;
     switch (it->second.list) {
         case List::kT1:
         case List::kT2:
@@ -97,7 +98,7 @@ void ArcEviction::OnAccess(const BlockKey& key) {
 
 void ArcEviction::TrimGhostsForInsert() {
     // ARC Case IV ghost-list bound maintenance. The physical eviction of a
-    // resident DRAM block (REPLACE) is decoupled here into Victim(); this method
+    // resident DRAM block (REPLACE) is decoupled into victim commit; this method
     // only trims the key-only ghost lists so they stay bounded (|L1| <= c,
     // total <= 2c).
     const size_t l1 = t1_.size() + b1_.size();
@@ -105,8 +106,8 @@ void ArcEviction::TrimGhostsForInsert() {
         if (t1_.size() < c_) {
             EraseLru(List::kB1);
         }
-        // else |T1| == c (B1 empty): cache is all T1; the resident eviction is
-        // Victim()'s responsibility, nothing to trim here.
+        // else |T1| == c (B1 empty): cache is all T1; victim commit handles the
+        // resident transition, so there is nothing to trim here.
     } else if (l1 < c_) {
         const size_t total = t1_.size() + t2_.size() + b1_.size() + b2_.size();
         if (total >= 2 * c_) {
@@ -119,6 +120,7 @@ void ArcEviction::OnInsert(const BlockKey& key, size_t /*size_bytes*/) {
     // size_bytes ignored: capacity is counted in blocks (see header).
     auto it = pos_.find(key);
     if (it != pos_.end()) {
+        if (reserved_ && reserved_->key == key) return;
         switch (it->second.list) {
             case List::kT1:
             case List::kT2:
@@ -151,13 +153,17 @@ void ArcEviction::OnInsert(const BlockKey& key, size_t /*size_bytes*/) {
 void ArcEviction::OnRemove(const BlockKey& key) {
     auto it = pos_.find(key);
     if (it == pos_.end()) return;
+    if (reserved_ && reserved_->key == key) reserved_.reset();
     ListRef(it->second.list).erase(it->second.it);
     pos_.erase(it);
 }
 
-std::optional<BlockKey> ArcEviction::Victim() {
+Result<BlockKey> ArcEviction::SelectVictim() {
     // ARC REPLACE: choose which resident DRAM block to demote.
-    if (t1_.empty() && t2_.empty()) return std::nullopt;
+    if (reserved_) {
+        return Status(StatusCode::kAlreadyExists, "ARC already has a reserved victim");
+    }
+    if (t1_.empty() && t2_.empty()) return Status::NotFound("ARC has no resident victim");
 
     bool use_t1;
     if (t1_.empty()) {
@@ -171,18 +177,39 @@ std::optional<BlockKey> ArcEviction::Victim() {
         use_t1 = static_cast<double>(t1_.size()) > p_;
     }
 
-    BlockKey victim;
+    Reservation reservation;
     if (use_t1) {
-        victim = t1_.back();
-        Relink(victim, List::kB1);  // T1.LRU -> B1.MRU (the sunk-to-SSD victim)
+        reservation = Reservation{t1_.back(), List::kT1};
     } else {
-        victim = t2_.back();
-        Relink(victim, List::kB2);  // T2.LRU -> B2.MRU
+        reservation = Reservation{t2_.back(), List::kT2};
     }
-    // The REPLACE context is consumed; further victims in the same eviction
-    // sweep use the plain |T1| > p rule.
+    reserved_ = reservation;
+    return reservation.key;
+}
+
+Status ArcEviction::CommitVictim(const BlockKey& key) {
+    if (!reserved_ || reserved_->key != key) {
+        return Status::InvalidArgument("ARC commit does not match the reserved victim");
+    }
+    auto it = pos_.find(key);
+    if (it == pos_.end() || it->second.list != reserved_->source) {
+        return Status::Internal("ARC reserved victim is not in its resident source list");
+    }
+
+    const List destination = reserved_->source == List::kT1 ? List::kB1 : List::kB2;
+    Relink(key, destination);
+    reserved_.reset();
+    // The REPLACE context is consumed only after the physical migration commits.
     last_hit_in_b2_ = false;
-    return victim;
+    return Status::Ok();
+}
+
+Status ArcEviction::CancelVictim(const BlockKey& key) {
+    if (!reserved_ || reserved_->key != key) {
+        return Status::InvalidArgument("ARC cancel does not match the reserved victim");
+    }
+    reserved_.reset();
+    return Status::Ok();
 }
 
 }  // namespace tidepool

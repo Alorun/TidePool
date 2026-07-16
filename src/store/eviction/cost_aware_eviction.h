@@ -27,7 +27,9 @@ public:
     void OnAccess(const BlockKey& key) override;
     void OnInsert(const BlockKey& key, size_t size_bytes) override;
     void OnRemove(const BlockKey& key) override;
-    std::optional<BlockKey> Victim() override;
+    Result<BlockKey> SelectVictim() override;
+    Status CommitVictim(const BlockKey& key) override;
+    Status CancelVictim(const BlockKey& key) override;
     const char* name() const override { return "cost-aware(stub)"; }
 
     // TODO: let the StorageNode feed recompute-cost estimates per key.

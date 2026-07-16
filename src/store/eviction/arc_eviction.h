@@ -38,7 +38,7 @@ public:
     // `capacity_blocks` = c, the DRAM cache size measured in blocks (>= 1).
     explicit ArcEviction(size_t capacity_blocks);
 
-    // Called on EVERY Get, including DRAM/SSD misses (see StorageNode::Get).
+    // Called after a successful DRAM or SSD read (see StorageNode::Get).
     // Handles the cases where ARC already knows the key:
     //   Case I   (key in T1/T2): move it to the MRU of T2.
     //   Case II  (key in B1, recency ghost): adapt p up, move key B1 -> T2 MRU.
@@ -54,15 +54,15 @@ public:
     // after a DRAM backfill without needing to know B1/B2 membership).
     void OnInsert(const BlockKey& key, size_t size_bytes) override;
 
-    // Forget all bookkeeping for `key` (resident or ghost). Same intent as
-    // LruEviction::OnRemove: called when a block is removed elsewhere.
+    // Forget all bookkeeping for an explicit, non-victim removal of `key`.
+    // Successful victim migration uses CommitVictim instead.
     void OnRemove(const BlockKey& key) override;
 
-    // ARC's REPLACE subroutine in pull form: pick the DRAM block to demote,
-    // move its key onto the matching ghost list (T1.LRU -> B1, T2.LRU -> B2),
-    // and return it. nullopt when DRAM (T1 and T2) is empty. The StorageNode
-    // calls this to free a DRAM slot, then sinks the returned block to SSD.
-    std::optional<BlockKey> Victim() override;
+    // ARC's REPLACE subroutine split into selection and commit. Selection only
+    // reserves the chosen T1/T2 LRU; commit performs T1->B1 or T2->B2.
+    Result<BlockKey> SelectVictim() override;
+    Status CommitVictim(const BlockKey& key) override;
+    Status CancelVictim(const BlockKey& key) override;
 
     const char* name() const override { return "arc"; }
 
@@ -73,12 +73,17 @@ public:
     size_t t2_size() const { return t2_.size(); }
     size_t b1_size() const { return b1_.size(); }
     size_t b2_size() const { return b2_.size(); }
+    bool has_reservation() const { return reserved_.has_value(); }
 
 private:
     enum class List { kNone, kT1, kT2, kB1, kB2 };
     struct Entry {
         List list = List::kNone;
         std::list<BlockKey>::iterator it;
+    };
+    struct Reservation {
+        BlockKey key;
+        List source = List::kNone;
     };
 
     std::list<BlockKey>& ListRef(List l);
@@ -98,11 +103,12 @@ private:
     size_t c_;        // cache capacity in blocks
     double p_ = 0.0;  // adaptive target size of T1, in [0, c]
     // Whether the most recent recognized access was a B2 (frequency) ghost hit;
-    // consumed by Victim()/REPLACE for its `x in B2 && |T1| == p` tie-break.
+    // consumed by CommitVictim()/REPLACE for its tie-break.
     bool last_hit_in_b2_ = false;
 
     std::list<BlockKey> t1_, t2_, b1_, b2_;  // front = MRU, back = LRU
     std::unordered_map<BlockKey, Entry> pos_;
+    std::optional<Reservation> reserved_;
 };
 
 }  // namespace tidepool

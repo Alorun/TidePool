@@ -16,13 +16,19 @@ public:
     void OnAccess(const BlockKey& key) override;
     void OnInsert(const BlockKey& key, size_t size_bytes) override;
     void OnRemove(const BlockKey& key) override;
-    std::optional<BlockKey> Victim() override;
+    Result<BlockKey> SelectVictim() override;
+    Status CommitVictim(const BlockKey& key) override;
+    Status CancelVictim(const BlockKey& key) override;
     const char* name() const override { return "lru"; }
+
+    size_t resident_size() const { return pos_.size(); }
+    bool has_reservation() const { return reserved_.has_value(); }
 
 private:
     // Front = most-recently-used, back = least-recently-used (the victim).
     std::list<BlockKey> order_;
     std::unordered_map<BlockKey, std::list<BlockKey>::iterator> pos_;
+    std::optional<BlockKey> reserved_;
 };
 
 }  // namespace tidepool
