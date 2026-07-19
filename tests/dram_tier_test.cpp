@@ -65,11 +65,11 @@ void TestOverwriteAndEvictStats() {
     CHECK(view.size == expected_size, "Get size matches final overwrite");
     CHECK(tier.Get(Key(99), dst, &view).code() == StatusCode::kNotFound, "Get missing key returns NotFound");
     MutableBuffer too_small{bytes.data(), 0};
-    CHECK(tier.Get(key, too_small, &view).code() == StatusCode::kInvalidArgument,
-          "invalid Get still counts as an attempted get");
+    CHECK(tier.Get(key, too_small, &view).code() == StatusCode::kOutOfCapacity,
+          "short Get buffer returns OutOfCapacity");
 
     TierStats before_missing_evict = tier.Stats();
-    CHECK(before_missing_evict.get_count == 3, "get_count includes hit, miss and invalid-buffer attempt");
+    CHECK(before_missing_evict.get_count == 1, "get_count includes only successful Gets");
     CHECK(before_missing_evict.hits == 1 && before_missing_evict.misses == 1, "hit/miss counters remain correct");
     CHECK(tier.Evict(Key(99)).code() == StatusCode::kNotFound, "Evict missing key returns NotFound");
     TierStats after_missing_evict = tier.Stats();

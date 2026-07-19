@@ -83,7 +83,7 @@ std::string SerializeBlock(const Block& block);
 //   * magic mismatch                              -> kInvalidArgument
 //   * unrecognized version                        -> kInvalidArgument
 //   * serde_id != 0 (compression not built yet)   -> kNotImplemented
-//   * 36 + payload_len exceeds blob length        -> kInvalidArgument
+//   * payload_len differs from bytes after header -> kInvalidArgument
 Status DeserializeHeader(std::string_view blob, BlockMetadata* meta_out, size_t* payload_len_out,
                          size_t* payload_offset_out);
 

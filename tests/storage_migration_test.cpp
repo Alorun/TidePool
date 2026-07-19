@@ -38,6 +38,13 @@ class FakeSsdTier final : public Tier {
 public:
     TierType type() const override { return TierType::kSsd; }
 
+    Result<BlockInfo> Probe(const BlockKey& key) override {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = store_.find(key);
+        if (it == store_.end()) return Status::NotFound(key.ToString());
+        return BlockInfo{it->second.metadata, it->second.size_bytes(), handles_.at(key)};
+    }
+
     Status Put(const BlockKey& key, const Block& block, uint64_t* out_handle) override {
         std::unique_lock<std::mutex> lock(mu_);
         if (block_next_put_) {
@@ -70,13 +77,18 @@ public:
         }
         stats_.put_count++;
         const uint64_t handle = next_handle_++;
+        handles_[key] = handle;
         if (out_handle) *out_handle = handle;
         return Status::Ok();
     }
 
     Status Get(const BlockKey& key, const MutableBuffer& dst, BlockView* out) override {
         std::lock_guard<std::mutex> lock(mu_);
-        stats_.get_count++;
+        if (out) *out = BlockView{};
+        if (out == nullptr) return Status::InvalidArgument("fake SSD out is null");
+        if (dst.data == nullptr && dst.capacity != 0) {
+            return Status::InvalidArgument("fake SSD destination is null");
+        }
         if (fail_next_get_) {
             fail_next_get_ = false;
             return Status::IoError("injected SSD Get failure");
@@ -87,16 +99,15 @@ public:
             return Status::NotFound(key.ToString());
         }
         const Block& block = it->second;
-        if (dst.data == nullptr || dst.capacity < block.size_bytes()) {
-            return Status::InvalidArgument("fake SSD destination buffer too small");
+        if (dst.capacity < block.size_bytes()) {
+            return Status(StatusCode::kOutOfCapacity, "fake SSD destination buffer too small");
         }
-        std::memcpy(dst.data, block.data.data(), block.size_bytes());
+        if (!block.data.empty()) std::memcpy(dst.data, block.data.data(), block.size_bytes());
+        stats_.get_count++;
         stats_.hits++;
-        if (out) {
-            out->data = dst.data;
-            out->size = block.size_bytes();
-            out->metadata = block.metadata;
-        }
+        out->data = dst.data;
+        out->size = block.size_bytes();
+        out->metadata = block.metadata;
         return Status::Ok();
     }
 
@@ -111,7 +122,30 @@ public:
         stats_.used_bytes -= it->second.size_bytes();
         stats_.num_blocks--;
         store_.erase(it);
+        handles_.erase(key);
         stats_.evict_count++;
+        return Status::Ok();
+    }
+
+    Status ValidateEraseExisting(const BlockKey&) const override {
+        return Status::NotImplemented("fake SSD has no volatile commit erasure");
+    }
+
+    void EraseExisting(const BlockKey&) noexcept override { std::terminate(); }
+
+    Status VisitEntries(
+        const std::function<Status(const BlockKey&, const BlockInfo&)>& visitor) const override {
+        std::vector<std::pair<BlockKey, BlockInfo>> entries;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            for (const auto& [key, block] : store_) {
+                entries.emplace_back(
+                    key, BlockInfo{block.metadata, block.size_bytes(), handles_.at(key)});
+            }
+        }
+        for (const auto& [key, info] : entries) {
+            if (Status s = visitor(key, info); !s.ok()) return s;
+        }
         return Status::Ok();
     }
 
@@ -155,6 +189,7 @@ private:
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::unordered_map<BlockKey, Block> store_;
+    std::unordered_map<BlockKey, uint64_t> handles_;
     uint64_t next_handle_ = 1;
     TierStats stats_;
     bool fail_next_put_ = false;
@@ -174,23 +209,26 @@ public:
         return DramTier::Get(key, dst, out);
     }
 
-    Status Evict(const BlockKey& key) override {
-        if (fail_next_evict_.exchange(false)) return Status::IoError("injected DRAM Evict failure");
-        return DramTier::Evict(key);
+    Status ValidateEraseExisting(const BlockKey& key) const override {
+        if (fail_next_validate_.exchange(false)) {
+            return Status::Internal("injected DRAM commit preflight failure");
+        }
+        return DramTier::ValidateEraseExisting(key);
     }
 
     void FailNextGet() { fail_next_get_.store(true); }
-    void FailNextEvict() { fail_next_evict_.store(true); }
+    void FailNextValidate() { fail_next_validate_.store(true); }
 
 private:
     std::atomic<bool> fail_next_get_{false};
-    std::atomic<bool> fail_next_evict_{false};
+    mutable std::atomic<bool> fail_next_validate_{false};
 };
 
 std::vector<uint8_t> ReadTier(Tier* tier, const BlockKey& key) {
-    const TierStats stats = tier->Stats();
-    std::vector<uint8_t> bytes(static_cast<size_t>(stats.used_bytes == 0 ? 1 : stats.used_bytes));
-    MutableBuffer dst{bytes.data(), bytes.size()};
+    auto info = tier->Probe(key);
+    CHECK(info.ok(), "tier block can be probed");
+    std::vector<uint8_t> bytes(info.value().payload_size);
+    MutableBuffer dst{bytes.empty() ? nullptr : bytes.data(), bytes.size()};
     BlockView view;
     CHECK(tier->Get(key, dst, &view).ok(), "tier block is readable");
     bytes.resize(view.size);
@@ -229,7 +267,7 @@ void TestLruSuccessfulDemotion() {
     CHECK(dram_ptr->Stats().used_bytes == 8 && dram_ptr->Stats().num_blocks == 2,
           "DRAM converges to exact capacity");
     CHECK(ssd_ptr->Stats().num_blocks == 1, "one victim reaches SSD");
-    CHECK(dram_ptr->Get(a, MutableBuffer{}, nullptr).code() == StatusCode::kNotFound,
+    CHECK(dram_ptr->Probe(a).status().code() == StatusCode::kNotFound,
           "demoted LRU victim left DRAM");
     CheckPayload(ssd_ptr, a, 4, 1);
     CheckLocation(node, a, TierType::kSsd);
@@ -324,7 +362,7 @@ void TestFailedOverwriteRestoresDataAndPolicyOrder() {
     CHECK(node.Close().ok(), "overwrite failure node closes");
 }
 
-void TestVictimReadAndDramEvictFailuresCancel() {
+void TestVictimReadAndCommitPreflightFailuresCancel() {
     {
         auto dram = std::make_unique<FaultInjectDramTier>(4);
         auto ssd = std::make_unique<FakeSsdTier>();
@@ -362,28 +400,28 @@ void TestVictimReadAndDramEvictFailuresCancel() {
         std::vector<std::unique_ptr<Tier>> tiers;
         tiers.push_back(std::move(dram));
         tiers.push_back(std::move(ssd));
-        StorageNode node("dram-evict-failure", std::move(tiers), std::move(policy));
-        CHECK(node.Open().ok(), "DRAM Evict failure node opens");
+        StorageNode node("dram-preflight-failure", std::move(tiers), std::move(policy));
+        CHECK(node.Open().ok(), "DRAM preflight failure node opens");
 
         const BlockKey a = Key(41), b = Key(42);
         CHECK(node.Put(a, SizedBlock(4, 1)).ok(), "initial Put succeeds");
-        dram_ptr->FailNextEvict();
-        CHECK(node.Put(b, SizedBlock(4, 2)).code() == StatusCode::kIoError,
-              "DRAM Evict failure reaches the caller");
+        dram_ptr->FailNextValidate();
+        CHECK(node.Put(b, SizedBlock(4, 2)).code() == StatusCode::kInternal,
+              "DRAM commit preflight failure reaches the caller");
         CheckPayload(dram_ptr, a, 4, 1);
-        CheckPayload(ssd_ptr, a, 4, 1);
         CheckLocation(node, a, TierType::kDram);
-        CHECK(!node.Contains(b).value(), "evict-failed initiating Put is rolled back");
+        CHECK(!node.Contains(b).value(), "preflight-failed initiating Put is absent");
+        CHECK(ssd_ptr->Stats().num_blocks == 0, "preflight failure happens before SSD Put");
         CHECK(policy_ptr->resident_size() == 1 && !policy_ptr->has_reservation(),
-              "DRAM Evict failure cancels reservation");
-        CHECK(node.Close().ok(), "DRAM Evict failure node closes");
+              "DRAM preflight failure cancels reservation");
+        CHECK(node.Close().ok(), "DRAM preflight failure node closes");
     }
 }
 
 void TestArcSuccessfulDemotion() {
-    auto dram = std::make_unique<DramTier>(4);
+    auto dram = std::make_unique<DramTier>(8);
     auto ssd = std::make_unique<FakeSsdTier>();
-    auto policy = std::make_unique<ArcEviction>(1);
+    auto policy = std::make_unique<ArcEviction>(2);
     DramTier* dram_ptr = dram.get();
     FakeSsdTier* ssd_ptr = ssd.get();
     ArcEviction* policy_ptr = policy.get();
@@ -393,15 +431,17 @@ void TestArcSuccessfulDemotion() {
     StorageNode node("arc-success", std::move(tiers), std::move(policy));
     CHECK(node.Open().ok(), "ARC node opens");
 
-    const BlockKey a = Key(51), b = Key(52);
+    const BlockKey a = Key(51), b = Key(52), c = Key(53);
     CHECK(node.Put(a, SizedBlock(4, 1)).ok(), "ARC Put A succeeds");
-    CHECK(node.Put(b, SizedBlock(4, 2)).ok(), "ARC Put B demotes A");
-    CHECK(dram_ptr->Stats().num_blocks == 1 && ssd_ptr->Stats().num_blocks == 1,
+    CHECK(node.Put(b, SizedBlock(4, 2)).ok(), "ARC Put B succeeds");
+    CHECK(node.Put(c, SizedBlock(4, 3)).ok(), "ARC Put C demotes A");
+    CHECK(dram_ptr->Stats().num_blocks == 2 && ssd_ptr->Stats().num_blocks == 1,
           "ARC migration moves exactly one block");
     CheckLocation(node, a, TierType::kSsd);
     CheckLocation(node, b, TierType::kDram);
-    CHECK(policy_ptr->t1_size() == 1 && policy_ptr->b1_size() == 1 && !policy_ptr->has_reservation(),
-          "ARC commit moves the T1 victim to B1");
+    CheckLocation(node, c, TierType::kDram);
+    CHECK(policy_ptr->t1_size() == 2 && policy_ptr->b1_size() == 0 && !policy_ptr->has_reservation(),
+          "ARC commit completes and the following cold insert applies the ghost bound");
     CHECK(node.Close().ok(), "ARC node closes");
 }
 
@@ -527,7 +567,7 @@ int main() {
     TestMultipleVictimsLoop();
     TestSsdPutFailureCancels();
     TestFailedOverwriteRestoresDataAndPolicyOrder();
-    TestVictimReadAndDramEvictFailuresCancel();
+    TestVictimReadAndCommitPreflightFailuresCancel();
     TestArcSuccessfulDemotion();
     TestOverwriteAccountingAndOversizedBlock();
     TestNoSinkRollsBack();

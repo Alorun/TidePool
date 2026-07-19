@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 #include "tidepool/api/block.h"
 #include "tidepool/api/block_key.h"
@@ -26,11 +27,19 @@ struct TierStats {
     uint64_t num_blocks = 0;
     uint64_t used_bytes = 0;
     uint64_t capacity_bytes = 0;
+    // Operation counters count successful completions only. NotFound,
+    // kOutOfCapacity and I/O errors do not increment them.
     uint64_t put_count = 0;
     uint64_t get_count = 0;
     uint64_t evict_count = 0;
     uint64_t hits = 0;
     uint64_t misses = 0;
+};
+
+struct BlockInfo {
+    BlockMetadata metadata;
+    size_t payload_size = 0;
+    uint64_t handle = 0;
 };
 
 class Tier {
@@ -46,16 +55,19 @@ public:
     virtual Status Close() { return Status::Ok(); }
     virtual bool IsReady() const { return true; }
 
+    // Return metadata and payload size without copying payload bytes.
+    virtual Result<BlockInfo> Probe(const BlockKey& key) = 0;
+
     // Store `block` under `key`. On success, `*out_handle` receives the
     // tier-local handle to embed in a Location.
     // TODO: support in-place / zero-copy ingestion from a registered MemRegion.
     virtual Status Put(const BlockKey& key, const Block& block, uint64_t* out_handle) = 0;
 
-    // Fetch the block for `key` into the caller-owned `dst`. On success, `*out`
-    // is a read-only view over the filled prefix of `dst` (out->data ==
-    // dst.data, out->size == the block's byte size). Returns kNotFound if
-    // absent in THIS tier, or kInvalidArgument if dst is null / smaller than
-    // the block.
+    // Fetch the block for `key` into caller-owned `dst`. `out` is required.
+    // Success guarantees out->size <= dst.capacity. A short buffer returns
+    // kOutOfCapacity; callers use Probe() to obtain the required size. Every
+    // failure clears `out`. A zero-length payload succeeds with
+    // {dst.data=nullptr, dst.capacity=0}.
     //
     // WHY this shape (changed from `Result<Block> Get`): the read path is the
     // hottest path and transfer efficiency is the point of the project.
@@ -72,6 +84,21 @@ public:
     // Drop `key` from this tier (does not cascade to other tiers; the
     // StorageNode orchestrates demotion across tiers).
     virtual Status Evict(const BlockKey& key) = 0;
+
+    // Preflight/commit pair used by StorageNode's persistent demotion commit.
+    // ValidateEraseExisting may fail before the SSD write. Once it succeeds,
+    // and while StorageNode retains exclusive node ownership, EraseExisting is
+    // a no-throw, no-allocation commit operation. Violating its precondition is
+    // an unrecoverable internal invariant failure.
+    virtual Status ValidateEraseExisting(const BlockKey& key) const = 0;
+    virtual void EraseExisting(const BlockKey& key) noexcept = 0;
+
+    // Enumerate currently valid entries for node index reconstruction. Tiers
+    // with no recoverable entries may use the empty default.
+    virtual Status VisitEntries(
+        const std::function<Status(const BlockKey&, const BlockInfo&)>& /*visitor*/) const {
+        return Status::Ok();
+    }
 
     virtual TierStats Stats() const = 0;
 };

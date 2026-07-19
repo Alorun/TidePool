@@ -97,8 +97,8 @@ Status DeserializeHeader(std::string_view blob, BlockMetadata* meta_out, size_t*
     // so a huge payload_len can't overflow the addition and slip past the check.
     // blob.size() >= kHeaderSize is already established above.
     const uint64_t available = blob.size() - kHeaderSize;
-    if (payload_len > available) {
-        return Status::InvalidArgument("block_codec: payload_len exceeds blob length");
+    if (payload_len != available) {
+        return Status::InvalidArgument("block_codec: payload_len does not exactly match blob length");
     }
 
     if (meta_out) {

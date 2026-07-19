@@ -1,0 +1,2 @@
+add_executable(tidepool_tiered_cache_bench tiered_cache_bench.cpp)
+target_link_libraries(tidepool_tiered_cache_bench PRIVATE tidepool_store)

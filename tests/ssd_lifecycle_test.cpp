@@ -132,8 +132,10 @@ void TestSsdDestructorAndConcurrentClose() {
     CHECK(tier.Open().ok(), "SSD opens for concurrent Close test");
     const BlockKey key = TestKey();
     const Block block = TestBlock();
+    uint64_t seed_handle = 0;
+    CHECK(tier.Put(key, block, &seed_handle).ok(), "concurrent Close test is seeded");
     std::atomic<int> attempts{0};
-    std::thread worker([&]() {
+    std::thread putter([&]() {
         for (int i = 0; i < 100; ++i) {
             uint64_t handle = 0;
             Status s = tier.Put(key, block, &handle);
@@ -142,9 +144,31 @@ void TestSsdDestructorAndConcurrentClose() {
             CHECK(s.ok(), "concurrent Put either succeeds or observes a closed tier");
         }
     });
+    std::thread getter([&]() {
+        std::vector<uint8_t> bytes(64);
+        for (int i = 0; i < 100; ++i) {
+            BlockView view;
+            Status s = tier.Get(key, MutableBuffer{bytes.data(), bytes.size()}, &view);
+            ++attempts;
+            if (s.code() == StatusCode::kUnavailable) return;
+            CHECK(s.ok() || s.code() == StatusCode::kNotFound,
+                  "concurrent Get succeeds, misses, or observes Close");
+        }
+    });
+    std::thread evicter([&]() {
+        for (int i = 0; i < 100; ++i) {
+            Status s = tier.Evict(key);
+            ++attempts;
+            if (s.code() == StatusCode::kUnavailable) return;
+            CHECK(s.ok() || s.code() == StatusCode::kNotFound,
+                  "concurrent Evict succeeds, misses, or observes Close");
+        }
+    });
     while (attempts.load() == 0) std::this_thread::yield();
-    CHECK(tier.Close().ok(), "Close safely synchronizes with Put");
-    worker.join();
+    CHECK(tier.Close().ok(), "Close safely synchronizes with Put/Get/Evict");
+    putter.join();
+    getter.join();
+    evicter.join();
     CHECK(!tier.IsReady(), "SSD is closed after concurrent operations finish");
     fs::remove_all(concurrent_path);
 }

@@ -36,6 +36,18 @@
 
 namespace tidepool {
 
+struct StorageNodeStats {
+    uint64_t dram_hits = 0;
+    uint64_t ssd_hits = 0;
+    uint64_t misses = 0;
+    uint64_t demotions = 0;
+    uint64_t promotions = 0;
+    // Payload bytes successfully served/read and committed to a tier,
+    // including internal demotion/promotion traffic.
+    uint64_t bytes_read = 0;
+    uint64_t bytes_written = 0;
+};
+
 // Tiers are supplied hottest-first (e.g. {DRAM, SSD}).
 class StorageNode {
 public:
@@ -68,6 +80,7 @@ public:
     // policy is notified (OnAccess) and the block may be promoted. Signature
     // mirrors Tier::Get so the no-copy contract holds end to end (see buffer.h).
     Status Get(const BlockKey& key, const MutableBuffer& dst, BlockView* out);
+    Result<BlockInfo> Probe(const BlockKey& key);
 
     // Cheap presence check used by Connector::Lookup batching. Returns
     // kUnavailable while the node is not open.
@@ -75,6 +88,7 @@ public:
     // Return the node-local primary location. Primarily used by local serving
     // and consistency tests; returns kUnavailable while the node is closed.
     Result<Location> Locate(const BlockKey& key) const;
+    StorageNodeStats Stats() const;
 
 private:
     // Private helpers require lifecycle_mu_ to be held by the caller.
@@ -82,15 +96,18 @@ private:
     // The next colder tier after DRAM (the demotion sink), or nullptr.
     Tier* ColderTierLocked();
     Status ReadBlockLocked(Tier* tier, const BlockKey& key, Block* out);
-    Status DemoteOneVictimLocked(Tier* dram, Tier* sink);
-    // Demote victims until DRAM is within its byte budget. Any failure is
-    // returned to Put so the initiating write can be rolled back.
-    Status MakeDramRoomLocked();
-    Status RollbackPutLocked(const BlockKey& key, Tier* hot, const std::optional<Location>& old_location,
-                             const std::optional<Block>& old_dram_block, bool policy_inserted);
-    // Backfill a block just read from a colder tier into DRAM (ARC promotion):
-    // make room, copy into DRAM, repoint the index, notify the policy.
-    void PromoteToDramLocked(const BlockKey& key, const BlockView& view);
+    Status DemoteOneVictimLocked(Tier* dram, Tier* sink,
+                                 const std::optional<BlockKey>& excluded = std::nullopt);
+    // Make the projected DRAM footprint fit before inserting new bytes.
+    Status MakeDramRoomForLocked(size_t incoming_bytes,
+                                 const std::optional<BlockKey>& replacing_dram_key = std::nullopt);
+    Status PutWithoutDramLocked(const BlockKey& key, const Block& block,
+                                const std::optional<Location>& old_location);
+    Status PutOversizedLocked(const BlockKey& key, const Block& block, Tier* dram, Tier* sink,
+                              const std::optional<Location>& old_location);
+    // Inclusive promotion: SSD remains a valid backing copy after LocalIndex
+    // switches to DRAM. Failure is best-effort and never changes Get's result.
+    void TryPromoteToDramLocked(const BlockKey& key, const BlockView& view);
 
     NodeId id_;
     std::vector<std::unique_ptr<Tier>> tiers_;  // hottest-first
@@ -98,6 +115,7 @@ private:
     LocalIndex index_;
     mutable std::mutex lifecycle_mu_;
     bool ready_ = false;
+    StorageNodeStats stats_;
 };
 
 }  // namespace tidepool

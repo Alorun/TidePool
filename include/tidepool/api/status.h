@@ -24,6 +24,7 @@ enum class StatusCode {
     kNetworkError,
     kUnavailable,    // node down / shard map stale, caller should refresh+retry
     kOutOfCapacity,  // tier full and eviction could not free space
+    kCorruption,     // malformed or internally inconsistent persisted data
     kInternal,
 };
 
@@ -44,6 +45,7 @@ public:
     static Status Unavailable(std::string msg) { return Status{StatusCode::kUnavailable, std::move(msg)}; }
     static Status IoError(std::string msg) { return Status{StatusCode::kIoError, std::move(msg)}; }
     static Status NetworkError(std::string msg) { return Status{StatusCode::kNetworkError, std::move(msg)}; }
+    static Status Corruption(std::string msg) { return Status{StatusCode::kCorruption, std::move(msg)}; }
     static Status Internal(std::string msg) { return Status{StatusCode::kInternal, std::move(msg)}; }
 
     bool ok() const { return code_ == StatusCode::kOk; }

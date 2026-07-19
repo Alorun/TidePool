@@ -37,7 +37,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # ---- Feature toggles --------------------------------------------------------
 option(TIDEPOOL_WITH_LEVELDB "Build the SSD tier with the LevelDB backend" OFF)
 option(TIDEPOOL_WITH_RDMA    "Build the RDMA transport with libibverbs"    OFF)
-option(TIDEPOOL_BUILD_TESTS  "Build the (placeholder) test targets"        ON)
+option(TIDEPOOL_BUILD_TESTS  "Build the test targets"                      ON)
+option(TIDEPOOL_BUILD_BENCHMARKS "Build standalone benchmarks"             ON)
 
 if(TIDEPOOL_WITH_LEVELDB)
   # LevelDB's exported target links Threads::Threads but some releases do not
@@ -64,6 +65,10 @@ endif()
 add_subdirectory(src)
 add_subdirectory(apps)
 add_subdirectory(integration/vllm)
+
+if(TIDEPOOL_BUILD_BENCHMARKS AND TIDEPOOL_WITH_LEVELDB)
+  add_subdirectory(bench)
+endif()
 
 if(TIDEPOOL_BUILD_TESTS)
   enable_testing()

@@ -1,6 +1,8 @@
 #include "arc_eviction.h"
 
 #include <algorithm>  // std::max, std::min
+#include <exception>
+#include <new>
 
 #include "tidepool/store/factory.h"
 
@@ -23,8 +25,10 @@ std::list<BlockKey>& ArcEviction::ListRef(List l) {
     return t1_;  // unreachable; keeps the compiler happy
 }
 
-void ArcEviction::Relink(const BlockKey& key, List dst, bool front) {
-    auto& e = pos_[key];
+void ArcEviction::Relink(const BlockKey& key, List dst, bool front) noexcept {
+    auto found = pos_.find(key);
+    if (found == pos_.end()) std::terminate();
+    auto& e = found->second;
     std::list<BlockKey>& src = ListRef(e.list);
     std::list<BlockKey>& d = ListRef(dst);
     // splice preserves e.it: the node simply moves to `d`.
@@ -36,10 +40,25 @@ void ArcEviction::Relink(const BlockKey& key, List dst, bool front) {
     e.list = dst;
 }
 
-void ArcEviction::PushFront(const BlockKey& key, List dst) {
+Status ArcEviction::PushFront(const BlockKey& key, List dst) {
     std::list<BlockKey>& d = ListRef(dst);
-    d.push_front(key);
-    pos_[key] = Entry{dst, d.begin()};
+    try {
+        d.push_front(key);
+        try {
+            auto [it, inserted] = pos_.emplace(key, Entry{dst, d.begin()});
+            (void)it;
+            if (!inserted) {
+                d.pop_front();
+                return Status::Internal("ARC insert found an unexpected duplicate");
+            }
+        } catch (...) {
+            d.pop_front();
+            throw;
+        }
+    } catch (const std::bad_alloc&) {
+        return Status(StatusCode::kOutOfCapacity, "ARC insert allocation failed");
+    }
+    return Status::Ok();
 }
 
 void ArcEviction::EraseLru(List l) {
@@ -61,7 +80,7 @@ void ArcEviction::AdaptDown() {
     p_ = std::max(0.0, p_ - ratio);
 }
 
-void ArcEviction::OnAccess(const BlockKey& key) {
+void ArcEviction::OnAccess(const BlockKey& key) noexcept {
     auto it = pos_.find(key);
     if (it == pos_.end()) {
         // Unknown key: ARC has never seen it (or it aged out of the ghosts).
@@ -96,7 +115,7 @@ void ArcEviction::OnAccess(const BlockKey& key) {
     }
 }
 
-void ArcEviction::TrimGhostsForInsert() {
+ArcEviction::List ArcEviction::GhostToTrimForInsert() const {
     // ARC Case IV ghost-list bound maintenance. The physical eviction of a
     // resident DRAM block (REPLACE) is decoupled into victim commit; this method
     // only trims the key-only ghost lists so they stay bounded (|L1| <= c,
@@ -104,53 +123,62 @@ void ArcEviction::TrimGhostsForInsert() {
     const size_t l1 = t1_.size() + b1_.size();
     if (l1 == c_) {
         if (t1_.size() < c_) {
-            EraseLru(List::kB1);
+            return List::kB1;
         }
         // else |T1| == c (B1 empty): cache is all T1; victim commit handles the
         // resident transition, so there is nothing to trim here.
     } else if (l1 < c_) {
         const size_t total = t1_.size() + t2_.size() + b1_.size() + b2_.size();
         if (total >= 2 * c_) {
-            EraseLru(List::kB2);
+            return List::kB2;
         }
     }
+    return List::kNone;
 }
 
-void ArcEviction::OnInsert(const BlockKey& key, size_t /*size_bytes*/) {
+Status ArcEviction::OnInsert(const BlockKey& key, size_t /*size_bytes*/) {
     // size_bytes ignored: capacity is counted in blocks (see header).
     auto it = pos_.find(key);
     if (it != pos_.end()) {
-        if (reserved_ && reserved_->key == key) return;
+        if (reserved_ && reserved_->key == key) {
+            return Status::InvalidArgument("ARC cannot insert its reserved victim");
+        }
         switch (it->second.list) {
             case List::kT1:
             case List::kT2:
                 // Already resident (overwrite, or a ghost OnAccess just
                 // promoted). Treat as a use; keep it in T2. No cold insert.
                 Relink(key, List::kT2);
-                return;
+                return Status::Ok();
             case List::kB1:
                 // A cold-insert path landed on a recency ghost (the access went
                 // through OnInsert rather than OnAccess). Promote like Case II.
                 AdaptUp();
                 last_hit_in_b2_ = false;
                 Relink(key, List::kT2);
-                return;
+                return Status::Ok();
             case List::kB2:
                 AdaptDown();
                 last_hit_in_b2_ = true;
                 Relink(key, List::kT2);
-                return;
+                return Status::Ok();
             case List::kNone:
                 break;
         }
     }
     // Case IV: brand-new key -> trim ghosts, then place at the MRU of T1.
-    TrimGhostsForInsert();
+    const List trim = GhostToTrimForInsert();
+    if (Status s = PushFront(key, List::kT1); !s.ok()) return s;
+    if (trim != List::kNone) EraseLru(trim);
     last_hit_in_b2_ = false;
-    PushFront(key, List::kT1);
+    return Status::Ok();
 }
 
-void ArcEviction::OnRemove(const BlockKey& key) {
+Status ArcEviction::OnPromotionCommitted(const BlockKey& key, size_t size_bytes) {
+    return OnInsert(key, size_bytes);
+}
+
+void ArcEviction::OnRemove(const BlockKey& key) noexcept {
     auto it = pos_.find(key);
     if (it == pos_.end()) return;
     if (reserved_ && reserved_->key == key) reserved_.reset();
@@ -158,7 +186,7 @@ void ArcEviction::OnRemove(const BlockKey& key) {
     pos_.erase(it);
 }
 
-Result<BlockKey> ArcEviction::SelectVictim() {
+Result<BlockKey> ArcEviction::SelectVictim(const std::optional<BlockKey>& excluded) {
     // ARC REPLACE: choose which resident DRAM block to demote.
     if (reserved_) {
         return Status(StatusCode::kAlreadyExists, "ARC already has a reserved victim");
@@ -177,17 +205,24 @@ Result<BlockKey> ArcEviction::SelectVictim() {
         use_t1 = static_cast<double>(t1_.size()) > p_;
     }
 
-    Reservation reservation;
-    if (use_t1) {
-        reservation = Reservation{t1_.back(), List::kT1};
-    } else {
-        reservation = Reservation{t2_.back(), List::kT2};
+    auto choose = [&](const std::list<BlockKey>& list, List source) -> std::optional<Reservation> {
+        for (auto it = list.rbegin(); it != list.rend(); ++it) {
+            if (!excluded || *it != *excluded) return Reservation{*it, source};
+        }
+        return std::nullopt;
+    };
+
+    std::optional<Reservation> reservation =
+        use_t1 ? choose(t1_, List::kT1) : choose(t2_, List::kT2);
+    if (!reservation) {
+        reservation = use_t1 ? choose(t2_, List::kT2) : choose(t1_, List::kT1);
     }
-    reserved_ = reservation;
-    return reservation.key;
+    if (!reservation) return Status::NotFound("ARC has no unpinned resident victim");
+    reserved_ = *reservation;
+    return reservation->key;
 }
 
-Status ArcEviction::CommitVictim(const BlockKey& key) {
+Status ArcEviction::ValidateVictimCommit(const BlockKey& key) const {
     if (!reserved_ || reserved_->key != key) {
         return Status::InvalidArgument("ARC commit does not match the reserved victim");
     }
@@ -195,13 +230,16 @@ Status ArcEviction::CommitVictim(const BlockKey& key) {
     if (it == pos_.end() || it->second.list != reserved_->source) {
         return Status::Internal("ARC reserved victim is not in its resident source list");
     }
+    return Status::Ok();
+}
 
+void ArcEviction::CommitVictim(const BlockKey& key) noexcept {
+    if (!ValidateVictimCommit(key).ok()) std::terminate();
     const List destination = reserved_->source == List::kT1 ? List::kB1 : List::kB2;
     Relink(key, destination);
     reserved_.reset();
     // The REPLACE context is consumed only after the physical migration commits.
     last_hit_in_b2_ = false;
-    return Status::Ok();
 }
 
 Status ArcEviction::CancelVictim(const BlockKey& key) {

@@ -38,30 +38,28 @@ public:
     // `capacity_blocks` = c, the DRAM cache size measured in blocks (>= 1).
     explicit ArcEviction(size_t capacity_blocks);
 
-    // Called after a successful DRAM or SSD read (see StorageNode::Get).
-    // Handles the cases where ARC already knows the key:
-    //   Case I   (key in T1/T2): move it to the MRU of T2.
-    //   Case II  (key in B1, recency ghost): adapt p up, move key B1 -> T2 MRU.
-    //   Case III (key in B2, frequency ghost): adapt p down, move key B2 -> T2.
-    // If the key is unknown (in none of the four lists) this is a no-op: the
-    // cold insert is left to OnInsert (Case IV).
-    void OnAccess(const BlockKey& key) override;
+    // Called only after a successful DRAM read. SSD hits use
+    // OnPromotionCommitted after the bytes have actually entered DRAM, so a
+    // failed best-effort promotion cannot create a false resident entry.
+    void OnAccess(const BlockKey& key) noexcept override;
 
     // Cold insert of a block newly entering DRAM (recomputed+Put, or an SSD hit
     // whose key is no longer in B1/B2). Case IV: place the key at the MRU of T1.
-    // Idempotent for already-tracked keys: a key that OnAccess just promoted out
-    // of a ghost list is left in T2 (so the StorageNode may always call OnInsert
-    // after a DRAM backfill without needing to know B1/B2 membership).
-    void OnInsert(const BlockKey& key, size_t size_bytes) override;
+    // For B1/B2 keys this is also the promotion commit operation: adapt p and
+    // move the ghost to T2 only after DRAM insertion has succeeded.
+    Status OnInsert(const BlockKey& key, size_t size_bytes) override;
+    Status OnPromotionCommitted(const BlockKey& key, size_t size_bytes) override;
 
     // Forget all bookkeeping for an explicit, non-victim removal of `key`.
     // Successful victim migration uses CommitVictim instead.
-    void OnRemove(const BlockKey& key) override;
+    void OnRemove(const BlockKey& key) noexcept override;
 
     // ARC's REPLACE subroutine split into selection and commit. Selection only
     // reserves the chosen T1/T2 LRU; commit performs T1->B1 or T2->B2.
-    Result<BlockKey> SelectVictim() override;
-    Status CommitVictim(const BlockKey& key) override;
+    Result<BlockKey> SelectVictim(
+        const std::optional<BlockKey>& excluded = std::nullopt) override;
+    Status ValidateVictimCommit(const BlockKey& key) const override;
+    void CommitVictim(const BlockKey& key) noexcept override;
     Status CancelVictim(const BlockKey& key) override;
 
     const char* name() const override { return "arc"; }
@@ -88,12 +86,13 @@ private:
 
     std::list<BlockKey>& ListRef(List l);
     // Splice `key`'s node from its current list to `dst` (front=MRU side).
-    void Relink(const BlockKey& key, List dst, bool front = true);
-    void PushFront(const BlockKey& key, List dst);
+    void Relink(const BlockKey& key, List dst, bool front = true) noexcept;
+    Status PushFront(const BlockKey& key, List dst);
     void EraseLru(List l);  // drop the LRU (back) key of a ghost list
 
-    // ARC Case IV ghost-list bound maintenance run before a cold insert.
-    void TrimGhostsForInsert();
+    // ARC Case IV ghost-list bound candidate chosen before a cold insert. The
+    // actual erase happens only after all new resident allocations succeed.
+    List GhostToTrimForInsert() const;
 
     // p += max(|B2|/|B1|, 1), clamped to c (recency ghost hit, Case II).
     void AdaptUp();

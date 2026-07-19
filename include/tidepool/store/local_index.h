@@ -24,20 +24,25 @@ class LocalIndex {
 public:
     // Insert or overwrite the location for `key`.
     Status Upsert(const BlockKey& key, const Location& loc);
+    // Insert only when absent. Used while rebuilding the index in hot-to-cold
+    // tier order so an inclusive SSD copy never overrides a DRAM primary.
+    Status InsertIfAbsent(const BlockKey& key, const Location& loc);
 
-    // Change only the tier-local placement fields of an existing entry after
-    // verifying its current tier. This performs no allocation and is used by the
-    // DRAM->SSD commit path while StorageNode holds its node-wide lock.
-    Status Relocate(const BlockKey& key, TierType expected_tier, TierType new_tier, uint64_t new_handle);
+    // Validate before a persistence commit, then relocate without allocation.
+    Status ValidateRelocate(const BlockKey& key, TierType expected_tier) const;
+    void RelocateExisting(const BlockKey& key, TierType expected_tier, TierType new_tier,
+                          uint64_t new_handle) noexcept;
 
     // Look up the current location of `key` on this node.
     Result<Location> Find(const BlockKey& key) const;
 
     // Remove `key` from the directory. Returns kNotFound if absent.
     Status Remove(const BlockKey& key);
+    void RemoveExisting(const BlockKey& key) noexcept;
 
     bool Contains(const BlockKey& key) const;
     size_t size() const { return table_.size(); }
+    void Swap(LocalIndex& other) noexcept { table_.swap(other.table_); }
 
 private:
     // TODO: shard this map + per-shard mutex for concurrent get/put.

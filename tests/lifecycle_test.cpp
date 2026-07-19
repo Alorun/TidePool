@@ -51,17 +51,33 @@ public:
 
     bool IsReady() const override { return state_->ready; }
 
+    Result<BlockInfo> Probe(const BlockKey&) override {
+        return state_->ready ? Result<BlockInfo>(Status::NotFound())
+                             : Result<BlockInfo>(Status::Unavailable("FakeTier is not open"));
+    }
+
     Status Put(const BlockKey&, const Block&, uint64_t*) override {
         return state_->ready ? Status::Ok() : Status::Unavailable("FakeTier is not open");
     }
 
-    Status Get(const BlockKey&, const MutableBuffer&, BlockView*) override {
+    Status Get(const BlockKey&, const MutableBuffer& dst, BlockView* out) override {
+        if (out) *out = BlockView{};
+        if (out == nullptr) return Status::InvalidArgument("FakeTier::Get: out is null");
+        if (dst.data == nullptr && dst.capacity != 0) {
+            return Status::InvalidArgument("FakeTier::Get: destination is null");
+        }
         return state_->ready ? Status::NotFound() : Status::Unavailable("FakeTier is not open");
     }
 
     Status Evict(const BlockKey&) override {
         return state_->ready ? Status::NotFound() : Status::Unavailable("FakeTier is not open");
     }
+
+    Status ValidateEraseExisting(const BlockKey&) const override {
+        return Status::NotFound("FakeTier contains no entries");
+    }
+
+    void EraseExisting(const BlockKey&) noexcept override { std::terminate(); }
 
     TierStats Stats() const override { return {}; }
 

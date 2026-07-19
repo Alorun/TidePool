@@ -136,7 +136,8 @@ static void TestArcEvictionPolicy() {
     arc.OnInsert(C, 0);
     auto v = arc.SelectVictim();
     CHECK(v.ok() && v.value() == B, "SelectVictim must reserve the T1 LRU (B)");
-    CHECK(arc.CommitVictim(B).ok(), "committing B must succeed");
+    CHECK(arc.ValidateVictimCommit(B).ok(), "committing B must be valid");
+    arc.CommitVictim(B);
     CHECK(arc.b1_size() == 1 && arc.t1_size() == 1 && arc.t2_size() == 1, "victim moves to B1");
 
     // Recency ghost hit on B (in B1): p adapts up by max(|B2|/|B1|,1)=1, B -> T2.
@@ -148,10 +149,12 @@ static void TestArcEvictionPolicy() {
     arc.OnInsert(D, 0);  // T1=[D,C], T2=[A,B]
     auto v1 = arc.SelectVictim();
     CHECK(v1.ok() && v1.value() == C, "first victim is recency (T1 LRU = C)");
-    CHECK(arc.CommitVictim(C).ok(), "committing C must succeed");
+    CHECK(arc.ValidateVictimCommit(C).ok(), "committing C must be valid");
+    arc.CommitVictim(C);
     auto v2 = arc.SelectVictim();  // now |T1|(=1) not > p(=1) -> demote from T2
     CHECK(v2.ok() && v2.value() == A, "second victim is frequency (T2 LRU = A)");
-    CHECK(arc.CommitVictim(A).ok(), "committing A must succeed");
+    CHECK(arc.ValidateVictimCommit(A).ok(), "committing A must be valid");
+    arc.CommitVictim(A);
     CHECK(arc.b2_size() == 1, "T2 victim moves to B2");
 
     // Frequency ghost hit on A (in B2): p adapts down by max(|B1|/|B2|,1)=1.
@@ -241,6 +244,10 @@ static void TestBlockCodecRobustness() {
     for (int i = 0; i < 8; ++i) lying_len[28 + i] = static_cast<char>(0xff);  // payload_len = huge
     CHECK(DeserializeHeader(lying_len, &meta, &plen, &poff).code() == StatusCode::kInvalidArgument,
           "payload_len past end -> kInvalidArgument");
+
+    CHECK(DeserializeHeader(good + "x", &meta, &plen, &poff).code() ==
+              StatusCode::kInvalidArgument,
+          "trailing bytes beyond payload_len -> kInvalidArgument");
 }
 
 #ifdef TIDEPOOL_WITH_LEVELDB
@@ -251,7 +258,7 @@ static void TestSsdTierRoundTrip() {
     const fs::path dir = fs::temp_directory_path() / ("tidepool_ssd_test_" + std::to_string(::getpid()));
     fs::remove_all(dir);  // start clean
 
-    const auto key = BlockKey::FromTokenPrefix({1, 2, 3}, 3);
+    const auto key = BlockKey::FromTokenPrefix({1, 2, 3}, 3, 0xabcU);
     Block blk;
     blk.metadata.num_tokens = 3;
     blk.metadata.model_fingerprint = 0xabcU;
@@ -290,7 +297,9 @@ static void TestSsdTierRoundTrip() {
         BlockView sview;
         const Status too_small = tier.Get(key, sdst, &sview);
         CHECK(too_small.code() == StatusCode::kOutOfCapacity, "undersized dst -> kOutOfCapacity");
-        CHECK(sview.data == nullptr && sview.size == 5, "probe reports required size without a view");
+        CHECK(sview.data == nullptr && sview.size == 0, "failed Get clears the output view");
+        auto info = tier.Probe(key);
+        CHECK(info.ok() && info.value().payload_size == 5, "Probe reports the required payload size");
 
         CHECK(tier.Evict(key).ok(), "SsdTier::Evict must succeed");
         CHECK(tier.Stats().num_blocks == 0 && tier.Stats().used_bytes == 0,

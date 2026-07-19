@@ -15,7 +15,10 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "tidepool/api/status.h"
 
 namespace tidepool {
 
@@ -39,6 +42,9 @@ struct BlockKey {
 
     // Stable string form used by tier backends (e.g. LevelDB key) and logs.
     std::string ToString() const;
+    // Strict inverse of ToString(). Rejects malformed, overflowing or trailing
+    // input instead of guessing missing fields.
+    static Result<BlockKey> FromString(std::string_view encoded);
 
     // TODO: replace std::hash<uint64_t> seed with a stronger 64-bit mixer
     // (e.g. xxh3) and make `model_fingerprint` derivation explicit.

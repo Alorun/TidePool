@@ -13,11 +13,14 @@ namespace tidepool {
 
 class LruEviction : public EvictionPolicy {
 public:
-    void OnAccess(const BlockKey& key) override;
-    void OnInsert(const BlockKey& key, size_t size_bytes) override;
-    void OnRemove(const BlockKey& key) override;
-    Result<BlockKey> SelectVictim() override;
-    Status CommitVictim(const BlockKey& key) override;
+    void OnAccess(const BlockKey& key) noexcept override;
+    Status OnInsert(const BlockKey& key, size_t size_bytes) override;
+    Status OnPromotionCommitted(const BlockKey& key, size_t size_bytes) override;
+    void OnRemove(const BlockKey& key) noexcept override;
+    Result<BlockKey> SelectVictim(
+        const std::optional<BlockKey>& excluded = std::nullopt) override;
+    Status ValidateVictimCommit(const BlockKey& key) const override;
+    void CommitVictim(const BlockKey& key) noexcept override;
     Status CancelVictim(const BlockKey& key) override;
     const char* name() const override { return "lru"; }
 

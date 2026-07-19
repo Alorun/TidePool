@@ -22,6 +22,8 @@ const char* StatusCodeName(StatusCode code) {
             return "Unavailable";
         case StatusCode::kOutOfCapacity:
             return "OutOfCapacity";
+        case StatusCode::kCorruption:
+            return "Corruption";
         case StatusCode::kInternal:
             return "Internal";
     }

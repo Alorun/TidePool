@@ -30,9 +30,14 @@ public:
     bool IsReady() const override;
 
     TierType type() const override { return TierType::kSsd; }
+    Result<BlockInfo> Probe(const BlockKey& key) override;
     Status Put(const BlockKey& key, const Block& block, uint64_t* out_handle) override;
     Status Get(const BlockKey& key, const MutableBuffer& dst, BlockView* out) override;
     Status Evict(const BlockKey& key) override;
+    Status ValidateEraseExisting(const BlockKey& key) const override;
+    void EraseExisting(const BlockKey& key) noexcept override;
+    Status VisitEntries(
+        const std::function<Status(const BlockKey&, const BlockInfo&)>& visitor) const override;
     TierStats Stats() const override;
 
 private:

@@ -5,9 +5,10 @@ inference instances on different machines share one KV cache pool, so the KV
 that a prefill instance computes can be read and reused by decode instances or
 other requests instead of being recomputed.
 
-> Status: **scaffold / skeleton**. Interfaces, module boundaries, build, and a
-> runnable single-node DRAM path are in place; most data-plane networking and
-> the SSD/RDMA/cost-aware paths are stubs marked `TODO` / `Status::NotImplemented`.
+> Status: **stage-1 single-node cache complete; distributed data plane remains
+> a scaffold**. The local DRAM + LevelDB SSD path supports demotion, inclusive
+> promotion and restart recovery. TCP/RDMA serving, remote Connector framing,
+> cost-aware eviction and inference-framework adapters remain later-stage work.
 
 ---
 
@@ -57,14 +58,14 @@ node* (`store/tier/*`); it is not the project itself.
   │ local shard   │                       DATA PLANE (hot path, no consensus)
   │  map cache    │       ┌──────────────────────────────────────────────┐
   │ (de)serialize │       │  Transfer Engine (Transport ABC)             │
-  └──────┬────────┘       │   - TCP (MVP)      - RDMA/libibverbs (stub)   │
+  └──────┬────────┘       │   - TCP (stub)     - RDMA/libibverbs (stub)   │
          │ register/read/write remote memory                            │
          ▼                │                                              │
   ┌──────────────────────────────────────────────────────────────────┐  │
   │  Storage Node × N   (together = the shared pool)                  │  │
   │  ┌───────────────┐  ┌──────────────┐  ┌───────────────────────┐   │  │
   │  │ Tiered Store  │  │ Local Index  │  │ Eviction Policy       │   │  │
-  │  │ DRAM ⇄ SSD    │  │ key→Location │  │ LRU now / cost-aware  │   │  │
+  │  │ DRAM ⇄ SSD    │  │ key→Location │  │ LRU / ARC / cost stub │   │  │
   │  │ (LevelDB)     │  │ pure local   │  │ (stub)                │   │  │
   │  └───────────────┘  └──────────────┘  └───────────────────────┘   │  │
   └──────────────────────────────────────────────────────────────────┘  │
@@ -77,14 +78,15 @@ node* (`store/tier/*`); it is not the project itself.
   consistent-hash ring; caches the shard map and only re-queries the control
   plane when it is stale; (de)serializes and chunks KV blocks.
 - **Transfer Engine** (`transport/`) — unified `RegisterMem / ReadRemote /
-  WriteRemote` abstraction. TCP is the MVP; RDMA (libibverbs) is the same ABC,
-  stubbed.
+  WriteRemote` abstraction. TCP framing/server work and RDMA (libibverbs) are
+  both later-stage implementations behind the same ABC.
 - **Storage Node** (`store/`) — N of them form the pool. Internals:
-  - **Tiered Store** (`store/tier/`) — DRAM and SSD (LevelDB) physical I/O,
-    interface-first so tiers can be added.
+  - **Tiered Store** (`store/tier/`) — DRAM and a prototype LevelDB-backed SSD
+    tier with strict record validation and restart enumeration.
   - **Local Index** (`store/index/`) — node-local in-memory hash table mapping
     key → which tier/handle. Purely local, **no consensus**.
-  - **Eviction** (`store/eviction/`) — LRU now; cost-aware interface reserved.
+  - **Eviction** (`store/eviction/`) — LRU and ARC are wired; cost-aware
+    selection remains reserved.
 
 **Control plane (low frequency, strongly consistent)**
 
@@ -121,8 +123,8 @@ already cached and decide what to recompute before fetching.
 | Interface        | Header                                   | Methods |
 |------------------|------------------------------------------|---------|
 | `Transport`      | `transport/transport.h`                  | `RegisterMem` / `ReadRemote` / `WriteRemote` |
-| `Tier`           | `store/tier.h`                           | `Put` / `Get` / `Evict` / `Stats` |
-| `EvictionPolicy` | `store/eviction_policy.h`                | `OnAccess` / `OnInsert` / `Victim` |
+| `Tier`           | `store/tier.h`                           | `Open` / `Probe` / `Put` / `Get` / `Evict` / `VisitEntries` / `Stats` |
+| `EvictionPolicy` | `store/eviction_policy.h`                | resident notifications + two-phase victim select/commit/cancel |
 | `Coordinator`    | `coordinator/coordinator.h`              | `GetShardMap` / `RegisterNode` / `Heartbeat` (versioned shard map) |
 
 Shared types live in `include/tidepool/api/`: `BlockKey`, `Block`, `Location`,
@@ -141,18 +143,55 @@ cmake --build build
 ctest --test-dir build        # runs the smoke test
 ```
 
-Optional backends:
+The default build keeps the SSD backend as a `NotImplemented` stub and needs no
+third-party dependency. Explicitly enabling LevelDB is strict: configuration
+fails if the exported `leveldb::leveldb` target cannot be found.
 
 ```bash
-cmake -B build -DTIDEPOOL_WITH_LEVELDB=ON   # real SSD tier (needs LevelDB)
+cmake -S . -B build-leveldb \
+  -DTIDEPOOL_WITH_LEVELDB=ON \
+  -Dleveldb_DIR=/path/to/lib/cmake/leveldb
+cmake --build build-leveldb
+ctest --test-dir build-leveldb
+
 cmake -B build -DTIDEPOOL_WITH_RDMA=ON       # link libibverbs (verbs still TODO)
 ```
+
+The LevelDB tier is a stage-1 prototype backend, not a production SSD engine:
+StorageNode currently uses one coarse-grained node mutex around lifecycle,
+index, policy and tier I/O. This makes the transaction ordering easy to prove
+and prevents `Close` racing with operations, but it serializes LevelDB access
+and limits throughput.
+
+Promotion is deliberately **inclusive**. After an SSD hit is copied into DRAM,
+the SSD record remains as a backing copy while LocalIndex names DRAM as the
+primary. A later DRAM demotion safely overwrites that SSD copy at the persistent
+commit point.
+
+Build and run the standalone stage-1 benchmark:
+
+```bash
+./build-leveldb/bin/tidepool_tiered_cache_bench \
+  --policy=lru \
+  --access-pattern=zipf \
+  --operations=100000
+
+./build-leveldb/bin/tidepool_tiered_cache_bench \
+  --policy=arc \
+  --access-pattern=zipf \
+  --operations=100000
+```
+
+It reports DRAM hits, LevelDB SSD hits, SSD-hit-plus-promotion, misses, latency
+percentiles, migrations and byte counts. Its `--simulated-recompute-us` result
+is only arithmetic against a configured delay: **simulated recompute is not a
+real vLLM/LLM Prefill benchmark**.
 
 Run the MVP binaries:
 
 ```bash
 ./build/bin/tidepool_coord                 # control-plane server (stubbed loop)
-./build/bin/tidepool_node node-0 127.0.0.1:7001
+./build-leveldb/bin/tidepool_node node-0 127.0.0.1:7001 /tmp/tidepool-node-0
 ```
 
 ### Layout
@@ -162,21 +201,24 @@ include/tidepool/   public headers (api, client, transport, store, coordinator, 
 src/                implementations (one library per module, each with its own CMakeLists)
 apps/               tidepool_node (storage node) + tidepool_coord (coordinator) entry points
 integration/vllm/   stub adapter onto a vLLM / LMCache KV backend
-tests/              placeholder smoke test
+tests/              lifecycle, tier contract, migration, promotion and recovery tests
+bench/              standalone stage-1 tiered-cache benchmark
 ```
 
 ---
 
 ## Roadmap
 
-- **Stage 1 — single-node, two tiers.** Get `Put`/`Get` working on one node with
-  DRAM + SSD (LevelDB), LRU eviction, local index. *(DRAM path is runnable today;
-  SSD backend + DRAM⇄SSD demotion are the next TODOs.)*
+- **Stage 1 — single-node, two tiers.** DRAM + prototype LevelDB SSD, LRU/ARC
+  demotion, inclusive promotion, strict Probe/Get semantics and restart
+  LocalIndex recovery are implemented and tested.
 - **Stage 2 — multi-node + addressing + control plane.** Consistent-hash routing
-  in the Connector, the TCP Transfer Engine read/write path, and the Coordinator
-  (register/heartbeat/shard-map versioning) wired end to end.
+  in the Connector, a real StorageNode RPC server, TCP Transfer Engine
+  read/write framing, and Coordinator shard-map version handling wired end to
+  end.
 - **Stage 3 — RDMA + cost-aware eviction.** libibverbs Transport implementation
-  and a cost-aware (recompute-cost vs. size vs. recency) eviction policy.
+  and a cost-aware (recompute-cost vs. size vs. recency) eviction policy, plus
+  real vLLM/LMCache adapter integration. Raft remains a control-plane extension.
 
 ### Explicitly out of scope (for now)
 
