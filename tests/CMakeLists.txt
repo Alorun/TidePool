@@ -31,6 +31,16 @@ add_test(NAME tidepool_lifecycle_test COMMAND tidepool_lifecycle_test)
 
 find_package(Threads REQUIRED)
 
+add_executable(tidepool_tcp_connection_test tcp_connection_test.cpp)
+target_link_libraries(tidepool_tcp_connection_test
+  PRIVATE tidepool_transport_tcp Threads::Threads)
+add_test(NAME tidepool_tcp_connection_test COMMAND tidepool_tcp_connection_test)
+
+add_executable(tidepool_wire_framing_test wire_framing_test.cpp)
+target_link_libraries(tidepool_wire_framing_test
+  PRIVATE tidepool_wire_framing Threads::Threads)
+add_test(NAME tidepool_wire_framing_test COMMAND tidepool_wire_framing_test)
+
 add_executable(tidepool_dram_tier_test dram_tier_test.cpp)
 target_include_directories(tidepool_dram_tier_test PRIVATE ${PROJECT_SOURCE_DIR}/src/store/tier/dram)
 target_link_libraries(tidepool_dram_tier_test PRIVATE tidepool_store Threads::Threads)

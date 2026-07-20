@@ -122,7 +122,9 @@ Result<std::string> DecodeErrorPayload(
     const CodecLimits& limits = {});
 
 // Validates the complete, contiguous payload against a decoded or constructed
-// header. These functions also require payload size to equal payload_bytes.
+// header. These functions also require payload size to equal payload_bytes and
+// reject the reserved request_id value zero. Raw EncodeHeader/DecodeHeader
+// deliberately preserve zero so framing remains a lossless primitive.
 Status ValidateRequest(const FrameHeader& header, const std::uint8_t* payload,
                        std::size_t size, const CodecLimits& limits = {});
 Status ValidateResponse(const FrameHeader& header,

@@ -531,6 +531,9 @@ Status ValidateRequest(const FrameHeader& header,
     if (header.kind != MessageKind::kRequest) {
         return Corrupt("ValidateRequest received a response header");
     }
+    if (header.request_id == 0) {
+        return Corrupt("request_id zero is reserved");
+    }
     if (Status status = ValidateDeclaredPayloadSize(header, payload, size);
         !status.ok()) {
         return status;
@@ -556,6 +559,9 @@ Status ValidateResponse(const FrameHeader& header,
     }
     if (header.kind != MessageKind::kResponse) {
         return Corrupt("ValidateResponse received a request header");
+    }
+    if (header.request_id == 0) {
+        return Corrupt("request_id zero is reserved");
     }
     if (Status status = ValidateDeclaredPayloadSize(header, payload, size);
         !status.ok()) {

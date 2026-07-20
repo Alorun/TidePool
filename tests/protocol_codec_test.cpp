@@ -484,10 +484,10 @@ void TestPingPayloads() {
     CHECK(!DecodePingRequest(&byte, 1).ok(),
           "Ping request with extra byte fails");
 
-    FrameHeader request_header = Request(Opcode::kPing, 0, 0);
+    FrameHeader request_header = Request(Opcode::kPing, 1, 0);
     CHECK(ValidateRequest(request_header, nullptr, 0).ok(),
-          "Ping request with request_id zero validates");
-    FrameHeader success_header = Response(Opcode::kPing, WireStatus::kOk, 0, 0);
+          "Ping request with nonzero request_id validates");
+    FrameHeader success_header = Response(Opcode::kPing, WireStatus::kOk, 1, 0);
     CHECK(ValidateResponse(success_header, nullptr, 0).ok(),
           "Ping success response validates");
     success_header.payload_bytes = 1;
@@ -496,7 +496,7 @@ void TestPingPayloads() {
 
     auto error = EncodeErrorPayload("unavailable");
     FrameHeader error_header = Response(Opcode::kPing, WireStatus::kUnavailable,
-                                        0, error.value().size());
+                                        1, error.value().size());
     CHECK(ValidateResponse(error_header, error.value().data(),
                            error.value().size())
               .ok(),
@@ -571,6 +571,14 @@ void TestSemanticValidation() {
           "request validator rejects response kind");
     CHECK(!ValidateResponse(get_header, get.value().data(), get.value().size()).ok(),
           "response validator rejects request kind");
+
+    FrameHeader zero_request_id = Request(Opcode::kGet, 0, get.value().size());
+    CHECK(!ValidateRequest(zero_request_id, get.value().data(), get.value().size()).ok(),
+          "request semantic validation rejects reserved request_id zero");
+    FrameHeader zero_response_id =
+        Response(Opcode::kGet, WireStatus::kOk, 0, get.value().size());
+    CHECK(!ValidateResponse(zero_response_id, get.value().data(), get.value().size()).ok(),
+          "response semantic validation rejects reserved request_id zero");
 
     FrameHeader unknown = get_header;
     unknown.opcode = static_cast<Opcode>(0xff);
