@@ -35,6 +35,7 @@ apps
 tidepool_node
 tidepool_coord
 *smoke_test
+*docs
 
 # ---- Optional backend artifacts ---------------------------------------------
 # SSD tier (LevelDB) scratch dirs used by the runnable demo (see apps/).

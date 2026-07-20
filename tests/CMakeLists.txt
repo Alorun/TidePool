@@ -1,5 +1,9 @@
 # The repository uses small dependency-free test executables so the default
 # build needs no test framework download.
+add_executable(tidepool_protocol_codec_test protocol_codec_test.cpp)
+target_link_libraries(tidepool_protocol_codec_test PRIVATE tidepool_protocol)
+add_test(NAME tidepool_protocol_codec_test COMMAND tidepool_protocol_codec_test)
+
 add_executable(tidepool_smoke_test smoke_test.cpp)
 target_link_libraries(tidepool_smoke_test
   PRIVATE
