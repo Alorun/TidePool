@@ -231,3 +231,4 @@ bench/              standalone stage-1 tiered-cache benchmark
 - **No production fault tolerance** — no replication / striping / failover; the
   hash ring is single-owner per key. Marked `TODO` (e.g. `HashRing::OwnerSet`).
 ```
+# roothound
