@@ -219,6 +219,43 @@ void TestFragmentedRead() {
     ::close(sockets[1]);
 }
 
+void TestCompleteFrameThenHalfClose() {
+    auto sockets = MakeSocketPair();
+    TcpConnection connection = Adopt(&sockets[0]);
+    const std::string payload("complete-frame\0then-close", 25);
+    const FrameHeader header =
+        Response(Opcode::kGet, WireStatus::kOk, 23, payload.size());
+    auto encoded = EncodeHeader(header);
+    CHECK(encoded.ok(), "complete-before-close frame header encodes");
+
+    bool header_sent = false;
+    bool payload_sent = false;
+    std::thread writer([&] {
+        std::this_thread::sleep_for(30ms);
+        header_sent =
+            SendAll(sockets[1], encoded.value().data(), encoded.value().size());
+        if (header_sent) {
+            payload_sent =
+                SendAll(sockets[1], payload.data(), payload.size());
+        }
+        ::shutdown(sockets[1], SHUT_WR);
+    });
+
+    auto frame = ReadWireFrame(connection);
+    writer.join();
+    CHECK(header_sent && payload_sent && frame.ok(),
+          "ReadWireFrame consumes complete frame before peer EOF");
+    CHECK(frame.value().payload == payload,
+          "complete frame before close preserves binary payload");
+    CheckHeader(frame.value().header, header,
+                "complete frame before close preserves header");
+
+    auto next = ReadWireFrame(connection);
+    CHECK(!next.ok() && next.status().code() == StatusCode::kNetworkError,
+          "next frame read observes EOF after complete prior frame");
+    ::close(sockets[1]);
+}
+
 void TestMalformedAndTruncatedReads() {
     {
         auto sockets = MakeSocketPair();
@@ -449,6 +486,7 @@ void TestConsecutiveFrames() {
 int main() {
     TestReadCompleteAndEmptyFrames();
     TestFragmentedRead();
+    TestCompleteFrameThenHalfClose();
     TestMalformedAndTruncatedReads();
     TestWriteFrames();
     TestConsecutiveFrames();

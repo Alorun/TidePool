@@ -2,6 +2,8 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -26,6 +28,8 @@ using namespace std::chrono_literals;
 namespace {
 
 int g_checks = 0;
+
+void NoopSignalHandler(int /*signal*/) {}
 
 #define CHECK(cond, msg)                                                                   \
     do {                                                                                   \
@@ -415,6 +419,28 @@ void TestReadExact() {
 
     {
         auto sockets = MakeSocketPair();
+        TcpConnection connection = Adopt(&sockets[0], Options(1000ms));
+        const std::string message = "read-before-poll-hangup";
+        bool sent = false;
+        std::thread writer([&] {
+            std::this_thread::sleep_for(30ms);
+            sent = SendAll(sockets[1], message.data(), message.size());
+            ::shutdown(sockets[1], SHUT_WR);
+        });
+        std::string output(message.size(), '\0');
+        Status status = connection.ReadExact(output.data(), output.size());
+        writer.join();
+        CHECK(sent && status.ok() && output == message,
+              "ReadExact consumes complete data before POLLHUP");
+        char extra = 0;
+        CHECK(connection.ReadExact(&extra, 1).code() ==
+                  StatusCode::kNetworkError,
+              "ReadExact reports EOF only after buffered data is consumed");
+        ::close(sockets[1]);
+    }
+
+    {
+        auto sockets = MakeSocketPair();
         TcpConnection connection = Adopt(&sockets[0]);
         const char partial[] = {'a', 'b', 'c'};
         CHECK(SendAll(sockets[1], partial, sizeof(partial)),
@@ -513,6 +539,49 @@ void TestShutdownWakeupAndSingleDeadline() {
         CHECK(elapsed >= 150ms && elapsed < 1200ms,
               "partial progress does not reset read timeout");
         CHECK(!connection.IsOpen(), "deadline failure breaks connection");
+        ::close(sockets[1]);
+    }
+
+    {
+        struct sigaction action {};
+        struct sigaction previous {};
+        action.sa_handler = NoopSignalHandler;
+        ::sigemptyset(&action.sa_mask);
+        action.sa_flags = 0;
+        CHECK(::sigaction(SIGUSR1, &action, &previous) == 0,
+              "EINTR test installs non-restarting signal handler");
+
+        auto sockets = MakeSocketPair();
+        TcpConnection connection = Adopt(&sockets[0], Options(180ms));
+        Status read_status;
+        char output = 0;
+        pthread_t reader_id{};
+        std::atomic<bool> reader_ready{false};
+        const auto start = std::chrono::steady_clock::now();
+        std::thread reader([&] {
+            reader_id = ::pthread_self();
+            reader_ready.store(true, std::memory_order_release);
+            read_status = connection.ReadExact(&output, 1);
+        });
+        while (!reader_ready.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        int delivered = 0;
+        for (int i = 0; i < 6; ++i) {
+            std::this_thread::sleep_for(25ms);
+            if (::pthread_kill(reader_id, SIGUSR1) == 0) ++delivered;
+        }
+        reader.join();
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+
+        CHECK(delivered > 0, "EINTR test delivered at least one signal");
+        CHECK(read_status.code() == StatusCode::kUnavailable,
+              "EINTR-interrupted poll still reaches read timeout");
+        CHECK(elapsed >= 120ms && elapsed < 300ms,
+              "EINTR recomputes remaining time from the original deadline");
+        CHECK(::sigaction(SIGUSR1, &previous, nullptr) == 0,
+              "EINTR test restores prior signal handler");
         ::close(sockets[1]);
     }
 }

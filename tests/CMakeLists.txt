@@ -41,6 +41,11 @@ target_link_libraries(tidepool_wire_framing_test
   PRIVATE tidepool_wire_framing Threads::Threads)
 add_test(NAME tidepool_wire_framing_test COMMAND tidepool_wire_framing_test)
 
+add_executable(tidepool_tcp_connector_test tcp_connector_test.cpp)
+target_link_libraries(tidepool_tcp_connector_test
+  PRIVATE tidepool_rpc_client Threads::Threads)
+add_test(NAME tidepool_tcp_connector_test COMMAND tidepool_tcp_connector_test)
+
 add_executable(tidepool_dram_tier_test dram_tier_test.cpp)
 target_include_directories(tidepool_dram_tier_test PRIVATE ${PROJECT_SOURCE_DIR}/src/store/tier/dram)
 target_link_libraries(tidepool_dram_tier_test PRIVATE tidepool_store Threads::Threads)
